@@ -1,0 +1,14 @@
+# never commit API keys
+groq_api_key
+*.key
+
+# models are downloaded, not versioned
+*.bin
+
+# local artifacts
+*.wav
+*.log
+.DS_Store
+
+# local tooling
+.claude/
