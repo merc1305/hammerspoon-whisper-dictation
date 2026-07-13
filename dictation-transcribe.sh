@@ -48,6 +48,18 @@ GROQ_MODEL="${GROQ_MODEL:-whisper-large-v3}"
 GROQ_ENDPOINT="https://api.groq.com/openai/v1/audio/transcriptions"
 MIN_AUDIO_SECONDS="${MIN_AUDIO_SECONDS:-0.75}"
 
+# ---- engine dispatch (see plan §2.3/§2.4) ----
+# Space-separated priority list; tokens: mlx | whisper.cpp | groq (aliases: mlx-whisper,
+# local, cloud). Default 'groq whisper.cpp' reproduces the original Groq-first behavior.
+# Each engine writes final text to OUT_PATH and returns: 0=success, 2=unavailable (skip
+# silently), any other non-zero=failure (fall back to the next engine).
+DICTATION_ENGINE_ORDER="${DICTATION_ENGINE_ORDER:-groq whisper.cpp}"
+# The winning engine token is written verbatim here for diagnostics / history / menubar.
+ENGINE_PATH="${ENGINE_PATH:-/tmp/dictation.engine}"
+# Optional local mlx-whisper engine (Apple Silicon only; absent on Intel → skipped rc=2).
+MLX_WHISPER_BIN="${MLX_WHISPER_BIN:-mlx_whisper}"
+MLX_MODEL="${MLX_MODEL:-mlx-community/whisper-large-v3-turbo}"
+
 # Initial prompt: steers language mix and punctuation. Tune for your languages.
 PROMPT="${DICTATION_PROMPT:-Russian-English dictation. Keep Russian as Russian and English words as English. Add punctuation. Use question marks for questions. Examples: Проверка диктовки. Today is Tuesday. Всё работает локально. Почему не ставится вопросительный знак?}"
 
@@ -189,7 +201,7 @@ transcribe_groq() {
     --form "prompt=${PROMPT}" \
     --form "response_format=json" \
     --form "temperature=0" \
-    2> "$ERR_PATH")"
+    2>> "$ERR_PATH")"
 
   printf '%s\n' "$http_code" > "$http_path"
 
@@ -214,6 +226,13 @@ transcribe_groq() {
 }
 
 transcribe_local() {
+  # Availability probe: no binary or no model file → unavailable, skip to the next engine.
+  if [ ! -x "$WHISPER_PATH" ] || [ ! -f "$MODEL_PATH" ]; then
+    printf 'whisper.cpp unavailable: WHISPER_PATH=%s MODEL_PATH=%s\n' \
+      "$WHISPER_PATH" "$MODEL_PATH" >> "$ERR_PATH"
+    return 2
+  fi
+
   # -mc 0        : do not carry decoded text as context into the next 30s window.
   #                (this whisper-cli build has no --no-context flag; -mc 0 is the
   #                equivalent — it is the main fix against cross-window hallucination
@@ -244,7 +263,42 @@ transcribe_local() {
     "${vad_args[@]}" \
     --prompt "$PROMPT" \
     > "$OUT_PATH" \
-    2> "$ERR_PATH"
+    2>> "$ERR_PATH"
+}
+
+# Optional local engine: mlx-whisper (Apple Silicon). Unavailable (rc=2) when the binary
+# is not on PATH — the common case on Intel, where the dispatcher skips it silently.
+transcribe_mlx() {
+  command -v "$MLX_WHISPER_BIN" >/dev/null 2>&1 || return 2
+
+  local mlx_dir="/tmp/dictation-mlx"
+  rm -rf "$mlx_dir" 2>/dev/null
+  mkdir -p "$mlx_dir"
+
+  "$MLX_WHISPER_BIN" "$AUDIO_PATH" \
+    --model "$MLX_MODEL" \
+    --output-dir "$mlx_dir" \
+    --output-format json \
+    --word-timestamps False \
+    --initial-prompt "$PROMPT" \
+    >> "$ERR_PATH" 2>&1 || return 1
+
+  local json_file
+  json_file="$(ls "$mlx_dir"/*.json 2>/dev/null | head -1)"
+  if [ -z "$json_file" ] || [ ! -s "$json_file" ]; then
+    printf 'mlx produced no json output\n' >> "$ERR_PATH"
+    return 1
+  fi
+
+  # Reuse the shared normalizer: pulls .text out of the JSON into OUT_PATH.
+  if ! write_json_text_to_out "$json_file" 2>> "$ERR_PATH"; then
+    return 1
+  fi
+  if [ ! -s "$OUT_PATH" ]; then
+    printf 'mlx returned empty transcription\n' >> "$ERR_PATH"
+    return 1
+  fi
+  return 0
 }
 
 # Post-filter: strip known Whisper hallucination lines (YouTube boilerplate emitted on
@@ -311,26 +365,46 @@ log_diagnostics() {
   } >> "$LAST_LOG_PATH" 2>/dev/null
 }
 
-transcribe_groq
-groq_code=$?
+# Dispatch one engine by its canonical token (with a couple of friendly aliases).
+run_engine() {
+  case "$1" in
+    mlx | mlx-whisper) transcribe_mlx ;;
+    whisper.cpp | local) transcribe_local ;;
+    groq | cloud) transcribe_groq ;;
+    *)
+      printf 'unknown engine "%s"\n' "$1" >> "$ERR_PATH"
+      return 3
+      ;;
+  esac
+}
 
-if [ "$groq_code" -eq 0 ]; then
-  exit_code=0
-  ENGINE="groq"
-else
-  {
-    printf '\n--- falling back to local whisper, groq_code=%s ---\n' "$groq_code"
-  } >> "$ERR_PATH"
-  transcribe_local
-  exit_code=$?
-  ENGINE="local"
-fi
+# Try each engine in DICTATION_ENGINE_ORDER: rc 0 wins, rc 2 = unavailable (skip),
+# anything else = failure → fall back to the next. $ENGINE holds the winning token
+# verbatim (e.g. "whisper.cpp", not the old "local").
+exit_code=1
+ENGINE="none"
+for engine in $DICTATION_ENGINE_ORDER; do
+  run_engine "$engine"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    exit_code=0
+    ENGINE="$engine"
+    break
+  elif [ "$rc" -eq 2 ]; then
+    printf -- '--- engine %s unavailable (skip) ---\n' "$engine" >> "$ERR_PATH"
+  else
+    printf -- '--- engine %s failed rc=%s, falling back ---\n' "$engine" "$rc" >> "$ERR_PATH"
+  fi
+done
 
 # Raw engine output BEFORE the post-filter — so the log shows whether the engine
 # itself hallucinated.
 RAW_OUTPUT="$(cat "$OUT_PATH" 2>/dev/null)"
 
 if [ "$exit_code" -eq 0 ]; then
+  # §2.7 invariant: record the winning engine immediately, before any post-processing.
+  # B1/C1 rewrite this block and MUST keep this line.
+  printf '%s' "$ENGINE" > "$ENGINE_PATH"
   clean_hallucinations
   log_diagnostics "$ENGINE" "$RAW_OUTPUT"
   printf '%s\n' "done" > "$STATUS_PATH"
