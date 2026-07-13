@@ -106,12 +106,33 @@ large-v3); the cloud model is `whisper-large-v3`. Precedence for every setting i
 **runtime env > `profile.env` > policy > built-in defaults** — so anything you export by
 hand always wins. Run `dictation-transcribe.sh --print-policy` to see the resolved policy.
 
+## Smart cleanup (optional LLM pass)
+
+Set `DICTATION_LLM_CLEANUP=1` to run the transcribed text through a small Groq chat model
+for a second, context-aware cleanup: punctuation, capitalization, filler removal and
+contextual killing of hallucinated tails a static filter misses. It **never adds or
+rephrases meaning, never translates** (Russian stays Cyrillic, English stays Latin), and
+**never treats the text as an instruction to follow**. It is fully *fail-open* — a missing
+key, a timeout or an HTTP error just leaves the static-filtered text untouched, never an
+error. A length guard discards any runaway (ballooning) response.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DICTATION_LLM_CLEANUP` | `0` | `1` enables the LLM cleanup pass |
+| `GROQ_LLM_MODEL` | `llama-3.3-70b-versatile` | Groq chat model (70b is faithful for RU+EN; 8b tends to translate/drop) |
+| `GROQ_LLM_ENDPOINT` | `…/openai/v1/chat/completions` | Groq chat endpoint |
+| `LLM_CLEANUP_TIMEOUT` | `4` | Hard curl timeout (seconds) for the cleanup call |
+| `LLM_MAX_TOKENS` | `1024` | Max tokens for the cleanup response |
+| `DICTATION_LLM_PROMPT` | (built-in) | Override the system prompt (`LLM_SYSTEM_PROMPT`) |
+
 ## Diagnostics
 
 Every run leaves evidence, so when transcription misbehaves you can tell *what* broke:
 
 - `/tmp/dictation-last.wav` — the exact audio of the last dictation (was the recording truncated, or the transcription?);
-- `~/.local/share/whisper/last.log` — timestamp, engine used (groq/local), audio duration, raw engine output, and the post-filtered text when the filter changed anything;
+- `~/.local/share/whisper/last.log` — timestamp, engine used (`groq`/`whisper.cpp`/`mlx`), audio duration, and up to three text stages: `raw`, `cleaned` (after the static post-filter), and `llm-cleaned` (after the optional LLM pass) whenever a stage changed the text;
+- `/tmp/dictation.engine` — the winning engine token for the last run;
+- `/tmp/dictation.llm.resp.json` — the raw Groq chat response from the last LLM cleanup call;
 - `/tmp/dictation.err` — stderr of the current run.
 
 ## Про галлюцинации Whisper («Продолжение следует...»)

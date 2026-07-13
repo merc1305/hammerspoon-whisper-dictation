@@ -18,7 +18,7 @@ Source of truth: `plans/whisper-upgrade-plan.md`. Sequential order: A1 → A2 �
 | A1 | hardware-autodetect | ✅ done | detect.sh + profile.env; all 9 criteria green; commit'd |
 | A2 | engine-dispatcher | ✅ done | run_engine dispatcher, transcribe_mlx, ENGINE_PATH; T1-T6 green; commit'd |
 | A3 | model-policy | ✅ done | dictation-model-policy.sh + --print-policy; T1-T5 green; README table; commit'd |
-| B1 | llm-postprocess | pending | |
+| B1 | llm-postprocess | ✅ done | all 8 criteria green + runaway guard. **Deviation:** default model llama-3.1-8b-instant→**llama-3.3-70b-versatile** (8b translated RU↔EN & dropped content, failing bilingual "meaning intact"; 70b faithful, ~0.5s). timeout 2→4 for 70b headroom. Both overridable. |
 | A4 | language-default | pending | |
 | C1 | dictation-history | pending | |
 | C3 | toggle-mode | pending | |
