@@ -34,5 +34,27 @@ Source of truth: `plans/whisper-upgrade-plan.md`. Sequential order: A1 → A2 �
 - IPC contract: /tmp/dictation.{status,txt,err}, pid file. init.lua polls only status.
 - §2.7: `printf '%s' "$ENGINE" > "$ENGINE_PATH"` must survive B1 & C1 rewrites of success branch.
 
+## Final integration & reviews (all green)
+- **12/12 tasks** implemented, verified, committed on `feature/whisper-upgrade` (14 commits).
+- Clean install from scratch (sandbox + dry-run): exit 0, idempotent, `--reinstall` forces, smoke=done.
+- E2E across all engines/fallbacks (groq / whisper.cpp / mlx-skip / broken-key-fallback / forced-lang): all `done`, RU+EN preserved, history grows.
+- init.lua loads fully under stub: menubar built, PTT/toggle switch, both watchdogs armed, all reload-surviving globals present.
+- **/verify:** PASS (deployed worker driven E2E + 3 probes held).
+- **/code-review:** 1 low-sev finding (menu build on corrupted history `ts`) → fixed; no correctness/security bugs survived.
+- **/security-review:** CLEAN — no secrets in history/temp/logs; key 600 + HTTPS-only; injection-safe (quoted vars, `%q`, validated pid); transcribed text never exec'd.
+- **/simplify:** memoized `audio_duration_seconds` (3×→1× ffprobe); rest already clean.
+
+## Deviations from the plan (documented, evidence-backed)
+1. **B1 LLM model:** default `llama-3.1-8b-instant` → **`llama-3.3-70b-versatile`** — 8b reliably translated RU↔EN and dropped content, failing the bilingual "meaning intact" criterion; 70b is faithful and still sub-second. Overridable via `GROQ_LLM_MODEL`. Timeout 2→4 for headroom.
+2. **D1 model URL org:** `ggml-org/whisper.cpp` → **`ggerganov/whisper.cpp`** — the plan-mandated org 401s for these `.bin` files (verified); ggerganov returns 200/206 and matches the original README. Criterion (e) requires a *downloadable* URL.
+3. **A4 bugfix:** `${arr[@]}` under `set -u` on macOS bash 3.2 errors on empty arrays → switched vad_args/lang_args to `${arr[@]+"${arr[@]}"}` (also fixed a pre-existing latent bug: local engine broke without a VAD model).
+4. **D1 extra flag:** added `--dry-run` (additive) for safe previewing.
+
 ## BLOCKERS
-(none)
+(none — 100% complete)
+
+## Remaining for the human
+Six live checks in [MANUAL-ACCEPTANCE.md](MANUAL-ACCEPTANCE.md) (fn key / menu-bar pixels /
+sleep / paste into a third-party app — not drivable headless). The transcription worker is
+already deployed to `~/.local/bin`; only `init.lua` needs deploying (`./install.sh`) +
+a Hammerspoon Reload for the UI features. Pushing / opening a PR is left to the human.
