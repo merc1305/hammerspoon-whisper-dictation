@@ -22,7 +22,7 @@ Source of truth: `plans/whisper-upgrade-plan.md`. Sequential order: A1 → A2 �
 | A4 | language-default | ✅ done | DICTATION_LANGUAGE=auto across all 3 engines; all criteria green incl. LLM bilingual. **Bugfix:** `${arr[@]}` under `set -u` on bash 3.2 → unbound; used `${arr[@]+"${arr[@]}"}` for vad_args (pre-existing latent bug: local engine broke without VAD) + lang_args. |
 | C1 | dictation-history | ✅ done | append_history() + dictationHistoryRead(); all criteria green (JSON schema, rotation, 600, disable, fail-open, reader newest-first). Worker deployed to ~/.local/bin. |
 | C3 | toggle-mode | ✅ done | triggerMode/toggleMaxSeconds; toggleCapture() reuses start/finishCapture; state-machine unit test green; guards intact. Live PTT/toggle → MANUAL. |
-| C4 | hotkey-watchdog | pending | |
+| C4 | hotkey-watchdog | ✅ done | rearmHotkeyTapIfDisabled() + dictationHotkeyWatchdog timer + systemDidWake hook; logic unit test green. Live sleep/wake re-arm → MANUAL. |
 | C2 | menubar-icon | pending | |
 | D1 | installer-wizard | pending | |
 | D3 | docs | pending | |

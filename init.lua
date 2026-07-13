@@ -27,6 +27,7 @@ local maxBufferBytes = 256 * 1024 * 1024 -- ~2.2 hours, then the buffer is rotat
 local triggerMode = "ptt"
 local toggleMaxSeconds = 300 -- safety auto-stop if a toggle session is left running
 local toggleStartAlert = true -- brief on-screen hint when a toggle session starts
+local hotkeyWatchdogInterval = 2 -- seconds between health checks of the fn event tap
 
 local transcribing = false
 local fnWasDown = false
@@ -594,6 +595,26 @@ local function toggleCapture()
   end
 end
 
+-- Re-arm the global fn event tap if macOS silently disabled it (after sleep, under load,
+-- or when secure input steals it). Separate from the ffmpeg recorder watchdog. Logs only
+-- on the disabled->re-armed transition; :start() on an enabled tap is a safe no-op.
+local function rearmHotkeyTapIfDisabled()
+  if not dictationFnTap then
+    return false
+  end
+  if dictationFnTap:isEnabled() then
+    return false
+  end
+  fnWasDown = false
+  if captureActive then
+    captureActive = false
+    indicatorHide()
+  end
+  dictationFnTap:start()
+  print("dictation fn event tap was disabled — re-armed")
+  return true
+end
+
 -- ===== watchdog: recorder alive, buffer growing, rotation =====
 
 dictationRecorderWatchdog = hs.timer.doEvery(5, function()
@@ -629,6 +650,7 @@ end)
 dictationWakeWatcher = hs.caffeinate.watcher.new(function(event)
   if event == hs.caffeinate.watcher.systemDidWake then
     restartRecorder()
+    rearmHotkeyTapIfDisabled()
   end
 end)
 dictationWakeWatcher:start()
@@ -668,6 +690,8 @@ dictationFnTap = hs.eventtap.new({ hs.eventtap.event.types.flagsChanged }, funct
 end)
 
 dictationFnTap:start()
+-- separate health watchdog for the fn event tap, independent of the recorder watchdog
+dictationHotkeyWatchdog = hs.timer.doEvery(hotkeyWatchdogInterval, rearmHotkeyTapIfDisabled)
 indicatorHide()
 
 -- kill an orphaned recorder from a previous config load, then start ours
