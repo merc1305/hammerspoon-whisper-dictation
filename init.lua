@@ -439,9 +439,9 @@ local function menubarBuildMenu()
     menu[#menu + 1] = { title = "No dictations yet", disabled = true }
   else
     for _, e in ipairs(entries) do
-      local when = e.ts and os.date("%H:%M", e.ts) or "--:--"
+      local when = (type(e.ts) == "number") and os.date("%H:%M", e.ts) or "--:--"
       local engine = e.engine or "unknown"
-      local text = e.text or ""
+      local text = tostring(e.text or "")
       menu[#menu + 1] = {
         title = string.format("%s  ·  %s  [%s]", when, menubarPreview(text), engine),
         fn = function()
