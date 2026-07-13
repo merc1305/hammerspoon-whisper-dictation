@@ -26,7 +26,7 @@ Source of truth: `plans/whisper-upgrade-plan.md`. Sequential order: A1 → A2 �
 | C2 | menubar-icon | ✅ done | 3-state icon + history dropdown; menu logic unit test green (header/rows/copy/clear/reload, UTF-8 preview); full init.lua load-under-stub green. Live icon colors/click → MANUAL. |
 | D1 | installer-wizard | ✅ done | install.sh; all criteria a-i green in sandbox (exit0/idempotent/--reinstall/755/backup/key600/smoke=done/Linux-exit/Apple-Silicon-sed). **Deviation:** model URL org ggml-org→**ggerganov** (plan's ggml-org/whisper.cpp 401s; ggerganov returns 200/206 — matches original README). +`--dry-run` flag. |
 | D3 | docs | ✅ done | 6 docs + index; README → landing page; link/scope/symbol cross-checks green; fallback confirmed (no key→engine=whisper.cpp). 2 links to skill/ resolve once D2 lands. |
-| D2 | skill-packaging | pending | |
+| D2 | skill-packaging | ✅ done | skill/whisper-dictation/{SKILL.md,references×3,whisper-doctor.sh}; frontmatter valid (name==folder, desc 692<1024, triggers+scope-guards); doctor read-only 9PASS/0FAIL exit0; 0 broken links (32 checked); install.sh link_skill idempotent. |
 
 ## Invariants being guarded
 - Ring buffer math in startCapture/finishCapture — untouched.

@@ -318,6 +318,33 @@ run_smoke_test() {
   fi
 }
 
+link_skill() {
+  local target="$SCRIPT_DIR/skill/whisper-dictation"
+  [ -d "$target" ] || return 0
+  local link_dir="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+  local link="$link_dir/whisper-dictation"
+  if [ -L "$link" ] || [ -e "$link" ]; then
+    ok "Claude Code skill already linked"
+    return 0
+  fi
+  local do_link=0
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '  [dry-run] ln -s %s %s\n' "$target" "$link"
+    return 0
+  elif [ "$ASSUME_YES" = "1" ]; then
+    do_link=1
+  else
+    printf 'Link the Claude Code skill into %s? [y/N] ' "$link_dir"
+    read -r reply
+    case "$reply" in y | Y | yes | YES) do_link=1 ;; esac
+  fi
+  if [ "$do_link" = "1" ]; then
+    run mkdir -p "$link_dir"
+    run ln -s "$target" "$link"
+    ok "Claude Code skill linked: $link"
+  fi
+}
+
 final_summary() {
   printf '\n%s✓ Installation complete%s\n' "$C_GREEN$C_BOLD" "$C_RESET"
   cat <<EOF
@@ -342,6 +369,7 @@ main() {
   install_scripts
   print_permissions
   run_smoke_test
+  link_skill
   final_summary
 }
 

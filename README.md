@@ -61,6 +61,18 @@ There's also a Claude Code skill in [`skill/whisper-dictation/`](skill/whisper-d
 - **History:** `~/.local/share/whisper/history.jsonl` (last 50, `chmod 600`); the menu-bar dropdown lists them.
 - Everything resolves as **runtime env > `profile.env` > policy > built-in defaults**. Run `dictation-transcribe.sh --print-policy` to see what's active.
 
+## Claude Code skill
+
+A [Claude Code](https://claude.com/claude-code) skill lives in
+[`skill/whisper-dictation/`](skill/whisper-dictation/) — it can install, configure and
+debug this tool (including a read-only `whisper-doctor.sh` health check). Make it available:
+
+```bash
+ln -s "$(pwd)/skill/whisper-dictation" ~/.claude/skills/whisper-dictation
+```
+
+`install.sh` offers to create this symlink for you.
+
 ## License
 
 MIT
