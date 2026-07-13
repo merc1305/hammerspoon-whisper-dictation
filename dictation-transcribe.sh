@@ -100,6 +100,11 @@ Example 2:
 Input: сохрани файл в downloads folder ну и покажи мне результат
 Output: Сохрани файл в downloads folder и покажи мне результат.}"
 
+# Language: 'auto' = RU+EN autodetect (default) — Whisper detects the language per
+# utterance and keeps Russian in Cyrillic / English in Latin without translating. An ISO
+# code (ru/en) forces a single language. Language bias lives in DICTATION_PROMPT below.
+DICTATION_LANGUAGE="${DICTATION_LANGUAGE:-auto}"
+
 # Initial prompt: steers language mix and punctuation. Tune for your languages.
 PROMPT="${DICTATION_PROMPT:-Russian-English dictation. Keep Russian as Russian and English words as English. Add punctuation. Use question marks for questions. Examples: Проверка диктовки. Today is Tuesday. Всё работает локально. Почему не ставится вопросительный знак?}"
 
@@ -240,6 +245,13 @@ transcribe_groq() {
   http_path="/tmp/dictation.groq.http"
   : > "$json_path"
 
+  # Only send a language field when a specific language is forced; 'auto' means let Groq
+  # autodetect (its API has no "auto" value — omitting the field IS autodetect).
+  local lang_args=()
+  if [ "$DICTATION_LANGUAGE" != "auto" ]; then
+    lang_args=(--form "language=${DICTATION_LANGUAGE}")
+  fi
+
   http_code="$(/usr/bin/curl \
     --silent \
     --show-error \
@@ -251,6 +263,7 @@ transcribe_groq() {
     --form "file=@${AUDIO_PATH};type=audio/wav" \
     --form "model=${GROQ_MODEL}" \
     --form "prompt=${PROMPT}" \
+    ${lang_args[@]+"${lang_args[@]}"} \
     --form "response_format=json" \
     --form "temperature=0" \
     2>> "$ERR_PATH")"
@@ -302,7 +315,7 @@ transcribe_local() {
   "$WHISPER_PATH" \
     -m "$MODEL_PATH" \
     -f "$AUDIO_PATH" \
-    -l auto \
+    -l "$DICTATION_LANGUAGE" \
     -nt \
     -np \
     -t 8 \
@@ -312,7 +325,7 @@ transcribe_local() {
     -nf \
     -mc 0 \
     -sns \
-    "${vad_args[@]}" \
+    ${vad_args[@]+"${vad_args[@]}"} \
     --prompt "$PROMPT" \
     > "$OUT_PATH" \
     2>> "$ERR_PATH"
@@ -327,10 +340,17 @@ transcribe_mlx() {
   rm -rf "$mlx_dir" 2>/dev/null
   mkdir -p "$mlx_dir"
 
+  # Only pass --language when a specific language is forced; omit it for RU+EN autodetect.
+  local lang_args=()
+  if [ "$DICTATION_LANGUAGE" != "auto" ]; then
+    lang_args=(--language "$DICTATION_LANGUAGE")
+  fi
+
   "$MLX_WHISPER_BIN" "$AUDIO_PATH" \
     --model "$MLX_MODEL" \
     --output-dir "$mlx_dir" \
     --output-format json \
+    ${lang_args[@]+"${lang_args[@]}"} \
     --word-timestamps False \
     --initial-prompt "$PROMPT" \
     >> "$ERR_PATH" 2>&1 || return 1
