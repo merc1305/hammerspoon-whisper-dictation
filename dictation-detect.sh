@@ -29,8 +29,10 @@ GROQ_KEY_PATH="${GROQ_KEY_PATH:-$HOME/.hammerspoon/groq_api_key}"
 PROFILE_PATH="${PROFILE_PATH:-$MODEL_DIR/profile.env}"
 
 # Canonical universal model + its HuggingFace URL (see plan §2.2/§2.4).
+# NOTE: the plan specified ggml-org/whisper.cpp, but that repo 401s for these .bin files;
+# the models actually live in ggerganov/whisper.cpp (verified 200/206). Using that.
 REC_MODEL_DEFAULT="ggml-large-v3-turbo-q5_0.bin"
-REC_MODEL_URL_BASE="https://huggingface.co/ggml-org/whisper.cpp/resolve/main"
+REC_MODEL_URL_BASE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 
 # ---- pure probes (no side effects) ----
 hw_arch() {

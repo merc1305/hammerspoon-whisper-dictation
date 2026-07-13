@@ -39,7 +39,24 @@ Two problems most DIY (and some commercial) setups get wrong:
 
 The recorder is only ever stopped with SIGINT (graceful; ffmpeg finalizes output). SIGKILL would truncate the recording tail.
 
-## Setup
+## Quick install
+
+One idempotent command detects your hardware, installs the parts, builds/locates
+whisper.cpp, downloads the models, wires up Hammerspoon (backing up any existing config),
+and smoke-tests the pipeline:
+
+```bash
+./install.sh          # add --yes for non-interactive, --dry-run to preview
+```
+
+Flags: `--yes` (non-interactive), `--skip-brew`, `--skip-local` (Groq-only / already
+built), `--reinstall` (force re-download + rebuild), `--no-smoke`, `--dry-run`. On a
+non-macOS system it exits cleanly and points you here. Then grant Hammerspoon
+**Accessibility** and **Microphone**, Reload Config, and hold `fn` to dictate.
+
+## Manual install (fallback)
+
+If you'd rather do it by hand:
 
 1. **Install the parts:**
 

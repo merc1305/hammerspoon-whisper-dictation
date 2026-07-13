@@ -10,6 +10,15 @@
 -- local whisper.cpp as fallback).
 
 local ffmpegPath = "/usr/local/bin/ffmpeg"
+-- install.sh rewrites the line above to the detected brew ffmpeg. If the path is missing
+-- anyway (e.g. a manual copy onto Apple Silicon, where brew lives in /opt/homebrew),
+-- fall back to whatever ffmpeg is on PATH.
+if not hs.fs.attributes(ffmpegPath) then
+  local resolved = (hs.execute("command -v ffmpeg 2>/dev/null") or ""):gsub("%s+$", "")
+  if resolved ~= "" then
+    ffmpegPath = resolved
+  end
+end
 local transcribeScriptPath = os.getenv("HOME") .. "/.local/bin/dictation-transcribe.sh"
 local bufferPath = "/tmp/dictation-buffer.raw"
 local resultPath = "/tmp/dictation.txt"
