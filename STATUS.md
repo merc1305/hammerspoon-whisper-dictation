@@ -23,7 +23,7 @@ Source of truth: `plans/whisper-upgrade-plan.md`. Sequential order: A1 → A2 �
 | C1 | dictation-history | ✅ done | append_history() + dictationHistoryRead(); all criteria green (JSON schema, rotation, 600, disable, fail-open, reader newest-first). Worker deployed to ~/.local/bin. |
 | C3 | toggle-mode | ✅ done | triggerMode/toggleMaxSeconds; toggleCapture() reuses start/finishCapture; state-machine unit test green; guards intact. Live PTT/toggle → MANUAL. |
 | C4 | hotkey-watchdog | ✅ done | rearmHotkeyTapIfDisabled() + dictationHotkeyWatchdog timer + systemDidWake hook; logic unit test green. Live sleep/wake re-arm → MANUAL. |
-| C2 | menubar-icon | pending | |
+| C2 | menubar-icon | ✅ done | 3-state icon + history dropdown; menu logic unit test green (header/rows/copy/clear/reload, UTF-8 preview); full init.lua load-under-stub green. Live icon colors/click → MANUAL. |
 | D1 | installer-wizard | pending | |
 | D3 | docs | pending | |
 | D2 | skill-packaging | pending | |

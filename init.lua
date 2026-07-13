@@ -28,6 +28,8 @@ local triggerMode = "ptt"
 local toggleMaxSeconds = 300 -- safety auto-stop if a toggle session is left running
 local toggleStartAlert = true -- brief on-screen hint when a toggle session starts
 local hotkeyWatchdogInterval = 2 -- seconds between health checks of the fn event tap
+local menubarEnabled = true -- show a menu-bar icon (in addition to the on-screen dot)
+local menubarHistoryCount = 10 -- how many recent dictations the dropdown lists
 
 local transcribing = false
 local fnWasDown = false
@@ -69,6 +71,16 @@ local indicatorColors = {
   processing = { red = 0.52, green = 0.72, blue = 0.92, alpha = 0.95 },
   success = { red = 0.18, green = 0.82, blue = 0.42, alpha = 0.98 },
   error = { red = 1.00, green = 0.18, blue = 0.24, alpha = 0.98 },
+}
+
+-- ===== menu-bar icon state (separate palette from the on-screen dot) =====
+local setMenubarState -- forward declaration; assigned once the icon builder exists below
+local menubarState = "idle"
+local menubarIcons = {} -- lazy cache of one hs.image per state
+local menubarColors = {
+  idle = { red = 0.55, green = 0.55, blue = 0.58, alpha = 1.0 },
+  recording = { red = 0.95, green = 0.20, blue = 0.24, alpha = 1.0 },
+  transcribing = { red = 1.00, green = 0.60, blue = 0.10, alpha = 1.0 },
 }
 
 local function indicatorStopTimer()
@@ -194,6 +206,8 @@ local function indicatorHide()
   if indicatorCanvas then
     indicatorCanvas:hide()
   end
+
+  if setMenubarState then setMenubarState("idle") end
 end
 
 local function indicatorShowAnimated(state, interval)
@@ -218,18 +232,22 @@ end
 
 local function indicatorShowRecording()
   indicatorShowAnimated("recording", 0.08)
+  if setMenubarState then setMenubarState("recording") end
 end
 
 local function indicatorShowProcessing()
   indicatorShowAnimated("processing", 0.08)
+  if setMenubarState then setMenubarState("transcribing") end
 end
 
 local function indicatorShowSuccess()
   indicatorPulse("success", 0.45)
+  if setMenubarState then setMenubarState("idle") end
 end
 
 local function indicatorShowError()
   indicatorPulse("error", 0.75)
+  if setMenubarState then setMenubarState("idle") end
 end
 
 local function showError(message)
@@ -301,6 +319,152 @@ function dictationHistoryRead(limit)
   end
 
   return entries
+end
+
+-- ===== menu-bar icon + history dropdown =====
+
+-- Lazily build and cache one hs.image per state via a throwaway canvas.
+local function menubarIconFor(state)
+  if menubarIcons[state] then
+    return menubarIcons[state]
+  end
+
+  local size = 22
+  local color = menubarColors[state] or menubarColors.idle
+  local canvas = hs.canvas.new({ x = 0, y = 0, w = size, h = size })
+  if state == "idle" then
+    canvas[1] = {
+      type = "circle",
+      action = "stroke",
+      strokeColor = color,
+      strokeWidth = 1.8,
+      center = { x = size / 2, y = size / 2 },
+      radius = (size / 2) - 3,
+    }
+  else
+    canvas[1] = {
+      type = "circle",
+      action = "fill",
+      fillColor = color,
+      center = { x = size / 2, y = size / 2 },
+      radius = (size / 2) - 4,
+    }
+  end
+
+  local image = canvas:imageFromCanvas()
+  canvas:delete()
+  menubarIcons[state] = image
+  return image
+end
+
+-- Assign the forward-declared upvalue (NOT a new local) so the indicator hooks share it.
+setMenubarState = function(state)
+  menubarState = state
+  if dictationMenubar then
+    -- template=false (second arg) is mandatory: keep our colors instead of a mono glyph.
+    dictationMenubar:setIcon(menubarIconFor(state), false)
+  end
+end
+
+-- Collapse whitespace and clip a dictation to a short, UTF-8-safe preview.
+local function menubarPreview(text)
+  local t = (text or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  local limit = 48
+  if utf8 and utf8.len then
+    local n = utf8.len(t)
+    if n and n > limit then
+      local cut = utf8.offset(t, limit + 1)
+      if cut then
+        t = t:sub(1, cut - 1) .. "…"
+      end
+    end
+  elseif #t > limit then
+    t = t:sub(1, limit) .. "…"
+  end
+  return t
+end
+
+-- Recent dictations newest-first, capped to menubarHistoryCount. Prefer the global reader;
+-- fall back to parsing the jsonl directly if it is somehow unavailable.
+local function menubarHistoryEntries()
+  if type(dictationHistoryRead) == "function" then
+    local ok, entries = pcall(dictationHistoryRead, menubarHistoryCount)
+    if ok and type(entries) == "table" then
+      return entries
+    end
+  end
+
+  local entries = {}
+  local file = io.open(historyPath, "r")
+  if not file then
+    return entries
+  end
+  local lines = {}
+  for line in file:lines() do
+    if line and line:gsub("%s", "") ~= "" then
+      lines[#lines + 1] = line
+    end
+  end
+  file:close()
+  for i = #lines, 1, -1 do
+    local ok, entry = pcall(hs.json.decode, lines[i])
+    if ok and type(entry) == "table" then
+      entries[#entries + 1] = entry
+      if #entries >= menubarHistoryCount then
+        break
+      end
+    end
+  end
+  return entries
+end
+
+-- Built fresh every time the menu opens (passed to setMenu as a function).
+local function menubarBuildMenu()
+  local menu = {}
+  local modeLabel = (triggerMode == "toggle") and "Toggle" or "Push-to-talk"
+  menu[#menu + 1] = { title = "Dictation — " .. modeLabel, disabled = true }
+  menu[#menu + 1] = { title = "-" }
+
+  local entries = menubarHistoryEntries()
+  if #entries == 0 then
+    menu[#menu + 1] = { title = "No dictations yet", disabled = true }
+  else
+    for _, e in ipairs(entries) do
+      local when = e.ts and os.date("%H:%M", e.ts) or "--:--"
+      local engine = e.engine or "unknown"
+      local text = e.text or ""
+      menu[#menu + 1] = {
+        title = string.format("%s  ·  %s  [%s]", when, menubarPreview(text), engine),
+        fn = function()
+          hs.pasteboard.setContents(text) -- copy again, no auto-paste
+        end,
+      }
+    end
+  end
+
+  menu[#menu + 1] = { title = "-" }
+
+  local last = entries[1]
+  menu[#menu + 1] = {
+    title = "Copy last dictation",
+    disabled = (last == nil),
+    fn = last and function()
+      hs.pasteboard.setContents(last.text or "")
+    end or nil,
+  }
+  menu[#menu + 1] = {
+    title = "Clear history",
+    disabled = (#entries == 0),
+    fn = (#entries > 0) and function()
+      os.remove(historyPath)
+    end or nil,
+  }
+
+  menu[#menu + 1] = { title = "-" }
+  menu[#menu + 1] = { title = "Settings: edit ~/.hammerspoon/init.lua", disabled = true }
+  menu[#menu + 1] = { title = "Reload config", fn = function() hs.reload() end }
+
+  return menu
 end
 
 local function clearTranscribePollTimer()
@@ -692,6 +856,18 @@ end)
 dictationFnTap:start()
 -- separate health watchdog for the fn event tap, independent of the recorder watchdog
 dictationHotkeyWatchdog = hs.timer.doEvery(hotkeyWatchdogInterval, rearmHotkeyTapIfDisabled)
+
+-- menu-bar icon (in addition to the on-screen dot); dictationMenubar is a global so it
+-- survives config reloads.
+if menubarEnabled then
+  dictationMenubar = hs.menubar.new()
+  if dictationMenubar then
+    dictationMenubar:setMenu(menubarBuildMenu)
+    dictationMenubar:setTooltip("Whisper dictation")
+    setMenubarState("idle")
+  end
+end
+
 indicatorHide()
 
 -- kill an orphaned recorder from a previous config load, then start ours
