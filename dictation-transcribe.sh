@@ -25,6 +25,8 @@ if [ "${1:-}" = "--cut" ]; then
   BUFFER_PATH="${2:?buffer path required}"
   START_BYTES="${3:?start bytes required}"
   END_BYTES="${4:?end bytes required}"
+elif [ "${1:-}" = "--print-policy" ]; then
+  MODE="print-policy"
 elif [ -n "${1:-}" ]; then
   AUDIO_PATH="$1"
 fi
@@ -35,6 +37,13 @@ fi
 # and pre-resolved recommendations. Re-sourcing is idempotent and no-op-safe.
 PROFILE_PATH="${DICTATION_PROFILE:-$HOME/.local/share/whisper/profile.env}"
 [ -f "$PROFILE_PATH" ] && . "$PROFILE_PATH"
+# Model policy: derive engine order / local model / cloud model from the detected facts,
+# filling only what runtime env and profile.env left empty (env > profile > policy).
+DICTATION_MODEL_POLICY="${DICTATION_MODEL_POLICY:-$HOME/.local/bin/dictation-model-policy.sh}"
+if [ -f "$DICTATION_MODEL_POLICY" ]; then
+  . "$DICTATION_MODEL_POLICY"
+  resolve_model_policy
+fi
 FFMPEG_PATH="${FFMPEG_PATH:-/usr/local/bin/ffmpeg}"
 FFPROBE_PATH="${FFPROBE_PATH:-/usr/local/bin/ffprobe}"
 WHISPER_PATH="${WHISPER_PATH:-$HOME/.local/opt/whisper.cpp/build-metal/bin/whisper-cli}"
@@ -79,6 +88,18 @@ OUT_PATH="/tmp/dictation.txt"
 ERR_PATH="/tmp/dictation.err"
 STATUS_PATH="/tmp/dictation.status"
 PID_PATH="/tmp/dictation-whisper.pid"
+
+if [ "$MODE" = "print-policy" ]; then
+  # Diagnostics: show the resolved policy without touching any IPC file.
+  model_exists=0
+  [ -f "$MODEL_PATH" ] && model_exists=1
+  printf 'DICT_TIER=%s\n' "${DICT_TIER:-weak}"
+  printf 'DICTATION_ENGINE_ORDER=%s\n' "$DICTATION_ENGINE_ORDER"
+  printf 'MODEL_PATH=%s\n' "$MODEL_PATH"
+  printf 'GROQ_MODEL=%s\n' "$GROQ_MODEL"
+  printf 'MODEL_PATH_EXISTS=%s\n' "$model_exists"
+  exit 0
+fi
 
 printf '%s\n' "$$" > "$PID_PATH"
 printf '%s\n' "running" > "$STATUS_PATH"

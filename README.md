@@ -87,6 +87,25 @@ Everything lives at the top of the two files:
 - `init.lua` — paths, pre-roll, minimum hold duration, indicator colors, the `fn` trigger key.
 - `dictation-transcribe.sh` — every path and knob is an environment variable (`WHISPER_PATH`, `MODEL_PATH`, `VAD_MODEL_PATH`, `GROQ_MODEL`, `DICTATION_PROMPT`, `HALLUCINATION_PHRASES`, …). The prompt steers language mix and punctuation; the default is tuned for mixed Russian/English dictation — change it for your languages.
 
+## Model policy
+
+There is **no model menu** — `dictation-detect.sh` inspects the machine and picks the
+best engine order and local model automatically, written into
+`~/.local/share/whisper/profile.env`. `dictation-transcribe.sh` sources that profile and
+`dictation-model-policy.sh` fills any gaps at runtime.
+
+| Tier | Condition | Engine order | Local model (preferred) |
+|---|---|---|---|
+| **apple-strong** + mlx | arm64, RAM ≥ 16, `mlx_whisper` present | `mlx whisper.cpp groq` | turbo → turbo-q5 → large-v3 |
+| **apple-strong / apple-capable** | arm64, whisper.cpp built | `whisper.cpp groq` | turbo-q5 → turbo → large-v3 |
+| **weak** | Intel / low RAM / no Metal build | `groq whisper.cpp` | turbo-q5 (offline fallback) |
+| empty (no key, no build) | — | `groq whisper.cpp` | turbo-q5 (default path) |
+
+The universal model is `ggml-large-v3-turbo-q5_0.bin` (latency wins; Russian turbo ≈
+large-v3); the cloud model is `whisper-large-v3`. Precedence for every setting is
+**runtime env > `profile.env` > policy > built-in defaults** — so anything you export by
+hand always wins. Run `dictation-transcribe.sh --print-policy` to see the resolved policy.
+
 ## Diagnostics
 
 Every run leaves evidence, so when transcription misbehaves you can tell *what* broke:
