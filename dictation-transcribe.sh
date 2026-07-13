@@ -200,11 +200,18 @@ read_groq_key() {
 }
 
 audio_duration_seconds() {
-  "$FFPROBE_PATH" \
+  # Memoized: AUDIO_PATH is fixed for the run, so probe once and reuse (this is called on
+  # the hot path by audio_is_too_short, log_diagnostics and append_history).
+  if [ -n "${_AUDIO_DURATION_CACHE:-}" ]; then
+    printf '%s' "$_AUDIO_DURATION_CACHE"
+    return
+  fi
+  _AUDIO_DURATION_CACHE="$("$FFPROBE_PATH" \
     -v error \
     -show_entries format=duration \
     -of default=noprint_wrappers=1:nokey=1 \
-    "$AUDIO_PATH" 2>/dev/null
+    "$AUDIO_PATH" 2>/dev/null)"
+  printf '%s' "$_AUDIO_DURATION_CACHE"
 }
 
 audio_is_too_short() {
