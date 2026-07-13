@@ -23,6 +23,11 @@ local prerollSeconds = 0.5
 local bytesPerSecond = 32000 -- 16 kHz * mono * s16 (2 bytes)
 local maxBufferBytes = 256 * 1024 * 1024 -- ~2.2 hours, then the buffer is rotated
 
+-- trigger mode: "ptt" (hold fn) is the default; "toggle" = tap fn to start, tap to stop.
+local triggerMode = "ptt"
+local toggleMaxSeconds = 300 -- safety auto-stop if a toggle session is left running
+local toggleStartAlert = true -- brief on-screen hint when a toggle session starts
+
 local transcribing = false
 local fnWasDown = false
 local transcribePollTimer = nil
@@ -41,6 +46,7 @@ local captureStartBytes = 0
 local captureSizeAtPress = 0
 local capturePressedAt = 0
 local capturePollTimer = nil
+local toggleAutoStopTimer = nil -- auto-stop timer for an active toggle session
 
 local function trim(text)
   return (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -521,6 +527,10 @@ local function finishCapture()
   end
 
   captureActive = false
+  if toggleAutoStopTimer then
+    toggleAutoStopTimer:stop()
+    toggleAutoStopTimer = nil
+  end
   local holdDuration = hs.timer.secondsSinceEpoch() - capturePressedAt
 
   if holdDuration < minDurationSeconds then
@@ -559,6 +569,29 @@ local function finishCapture()
   end
 
   poll()
+end
+
+-- toggle mode: one tap starts a capture, the next tap ends it. Reuses the exact same
+-- startCapture/finishCapture as push-to-talk — only the triggering edge differs.
+local function toggleCapture()
+  if captureActive then
+    finishCapture()
+    return
+  end
+
+  startCapture()
+  if captureActive then
+    if toggleStartAlert then
+      hs.alert.closeAll(0)
+      hs.alert.show("Dictation on — tap fn again to stop")
+    end
+    toggleAutoStopTimer = hs.timer.doAfter(toggleMaxSeconds, function()
+      toggleAutoStopTimer = nil
+      if captureActive then
+        finishCapture()
+      end
+    end)
+  end
 end
 
 -- ===== watchdog: recorder alive, buffer growing, rotation =====
@@ -612,12 +645,23 @@ dictationFnTap = hs.eventtap.new({ hs.eventtap.event.types.flagsChanged }, funct
   local flags = event:getFlags()
   local fnDown = flags.fn or false
 
-  if fnDown and not fnWasDown then
-    fnWasDown = true
-    startCapture()
-  elseif not fnDown and fnWasDown then
-    fnWasDown = false
-    finishCapture()
+  if triggerMode == "toggle" then
+    -- react only to the press edge; the release does nothing
+    if fnDown and not fnWasDown then
+      fnWasDown = true
+      toggleCapture()
+    elseif not fnDown and fnWasDown then
+      fnWasDown = false
+    end
+  else
+    -- push-to-talk (default): hold to record, release to transcribe
+    if fnDown and not fnWasDown then
+      fnWasDown = true
+      startCapture()
+    elseif not fnDown and fnWasDown then
+      fnWasDown = false
+      finishCapture()
+    end
   end
 
   return false

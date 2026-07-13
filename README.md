@@ -84,7 +84,7 @@ The recorder is only ever stopped with SIGINT (graceful; ffmpeg finalizes output
 
 Everything lives at the top of the two files:
 
-- `init.lua` — paths, pre-roll, minimum hold duration, indicator colors, the `fn` trigger key.
+- `init.lua` — paths, pre-roll, minimum hold duration, indicator colors, the `fn` trigger key. Set `triggerMode = "toggle"` (default `"ptt"`) to tap `fn` once to start and again to stop instead of holding; `toggleMaxSeconds` (default `300`) auto-stops a forgotten toggle session.
 - `dictation-transcribe.sh` — every path and knob is an environment variable (`WHISPER_PATH`, `MODEL_PATH`, `VAD_MODEL_PATH`, `GROQ_MODEL`, `DICTATION_PROMPT`, `DICTATION_LANGUAGE`, `HALLUCINATION_PHRASES`, …). The prompt steers language mix and punctuation; the default is tuned for mixed Russian/English dictation — change it for your languages.
 - `DICTATION_LANGUAGE` defaults to `auto` (RU+EN autodetect — Russian stays Cyrillic, English stays Latin, nothing is translated); set an ISO code like `ru` or `en` to force a single language across every engine. Language *bias* (not a hard force) belongs in `DICTATION_PROMPT`.
 
