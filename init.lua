@@ -16,6 +16,7 @@ local resultPath = "/tmp/dictation.txt"
 local errorPath = "/tmp/dictation.err"
 local statusPath = "/tmp/dictation.status"
 local pidPath = "/tmp/dictation-whisper.pid"
+local historyPath = os.getenv("HOME") .. "/.local/share/whisper/history.jsonl"
 
 local minDurationSeconds = 0.5
 local prerollSeconds = 0.5
@@ -261,6 +262,38 @@ local function readTextFile(path)
   local text = file:read("*a") or ""
   file:close()
   return text
+end
+
+-- Read the dictation history journal, newest-first, up to `limit` entries (default 20).
+-- The file is oldest-first (the shell worker appends), so we walk it backwards. Global
+-- so the menu bar (and any other consumer) can call it; blank/corrupt lines are skipped.
+function dictationHistoryRead(limit)
+  limit = limit or 20
+  local entries = {}
+  local file = io.open(historyPath, "r")
+  if not file then
+    return entries
+  end
+
+  local lines = {}
+  for line in file:lines() do
+    if line and line:gsub("%s", "") ~= "" then
+      lines[#lines + 1] = line
+    end
+  end
+  file:close()
+
+  for i = #lines, 1, -1 do
+    local ok, entry = pcall(hs.json.decode, lines[i])
+    if ok and type(entry) == "table" then
+      entries[#entries + 1] = entry
+      if #entries >= limit then
+        break
+      end
+    end
+  end
+
+  return entries
 end
 
 local function clearTranscribePollTimer()

@@ -20,7 +20,7 @@ Source of truth: `plans/whisper-upgrade-plan.md`. Sequential order: A1 → A2 �
 | A3 | model-policy | ✅ done | dictation-model-policy.sh + --print-policy; T1-T5 green; README table; commit'd |
 | B1 | llm-postprocess | ✅ done | all 8 criteria green + runaway guard. **Deviation:** default model llama-3.1-8b-instant→**llama-3.3-70b-versatile** (8b translated RU↔EN & dropped content, failing bilingual "meaning intact"; 70b faithful, ~0.5s). timeout 2→4 for 70b headroom. Both overridable. |
 | A4 | language-default | ✅ done | DICTATION_LANGUAGE=auto across all 3 engines; all criteria green incl. LLM bilingual. **Bugfix:** `${arr[@]}` under `set -u` on bash 3.2 → unbound; used `${arr[@]+"${arr[@]}"}` for vad_args (pre-existing latent bug: local engine broke without VAD) + lang_args. |
-| C1 | dictation-history | pending | |
+| C1 | dictation-history | ✅ done | append_history() + dictationHistoryRead(); all criteria green (JSON schema, rotation, 600, disable, fail-open, reader newest-first). Worker deployed to ~/.local/bin. |
 | C3 | toggle-mode | pending | |
 | C4 | hotkey-watchdog | pending | |
 | C2 | menubar-icon | pending | |

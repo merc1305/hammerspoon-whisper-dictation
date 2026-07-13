@@ -57,6 +57,13 @@ GROQ_MODEL="${GROQ_MODEL:-whisper-large-v3}"
 GROQ_ENDPOINT="https://api.groq.com/openai/v1/audio/transcriptions"
 MIN_AUDIO_SECONDS="${MIN_AUDIO_SECONDS:-0.75}"
 
+# ---- dictation history (see plan §2.5) ----
+# One JSON line per dictation, oldest first in the file, rotated to the last HISTORY_MAX
+# lines. HISTORY_MAX<=0 disables the journal. It stores the final post-filtered text, so
+# it is chmod 600.
+HISTORY_PATH="${DICTATION_HISTORY_PATH:-$HOME/.local/share/whisper/history.jsonl}"
+HISTORY_MAX="${DICTATION_HISTORY_MAX:-50}"
+
 # ---- engine dispatch (see plan §2.3/§2.4) ----
 # Space-separated priority list; tokens: mlx | whisper.cpp | groq (aliases: mlx-whisper,
 # local, cloud). Default 'groq whisper.cpp' reproduces the original Groq-first behavior.
@@ -546,6 +553,68 @@ log_diagnostics() {
   } >> "$LAST_LOG_PATH" 2>/dev/null
 }
 
+# Append one JSON line {ts,iso,text,engine,mode,dur} to the history journal (oldest
+# first), then rotate to the last HISTORY_MAX lines. Atomic (tmp + os.replace) and
+# chmod 600. Fail-open — never raises the run to error; skips when disabled or empty.
+append_history() {
+  [ "${HISTORY_MAX:-0}" -gt 0 ] 2>/dev/null || return 0
+  [ -s "$OUT_PATH" ] || return 0
+
+  local dur
+  dur="$(audio_duration_seconds)"
+  HIST_ENGINE="$ENGINE" HIST_MODE="$MODE" HIST_DUR="$dur" HIST_MAX="$HISTORY_MAX" \
+    /usr/bin/python3 - "$OUT_PATH" "$HISTORY_PATH" <<'PY' 2>> "$ERR_PATH"
+import datetime, json, os, sys, time
+out_path, hist_path = sys.argv[1], sys.argv[2]
+try:
+    with open(out_path, "r", encoding="utf-8") as f:
+        text = f.read().strip()
+except OSError:
+    sys.exit(0)
+if not text:
+    sys.exit(0)
+try:
+    hist_max = int(os.environ.get("HIST_MAX", "0"))
+except ValueError:
+    hist_max = 0
+if hist_max <= 0:
+    sys.exit(0)
+
+try:
+    dur = round(float(os.environ.get("HIST_DUR", "") or 0), 2)
+except ValueError:
+    dur = 0.0
+entry = {
+    "ts": int(time.time()),
+    "iso": datetime.datetime.now().astimezone().replace(microsecond=0).isoformat(),
+    "text": text,
+    "engine": os.environ.get("HIST_ENGINE", "") or "unknown",
+    "mode": os.environ.get("HIST_MODE", "") or "file",
+    "dur": dur,
+}
+line = json.dumps(entry, ensure_ascii=False)
+
+lines = []
+try:
+    with open(hist_path, "r", encoding="utf-8") as f:
+        lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+except OSError:
+    lines = []
+lines.append(line)
+lines = lines[-hist_max:]
+
+os.makedirs(os.path.dirname(hist_path) or ".", exist_ok=True)
+tmp = hist_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines))
+    if lines:
+        f.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, hist_path)
+PY
+  return 0
+}
+
 # Dispatch one engine by its canonical token (with a couple of friendly aliases).
 run_engine() {
   case "$1" in
@@ -590,6 +659,7 @@ if [ "$exit_code" -eq 0 ]; then
   STATIC_OUTPUT="$(cat "$OUT_PATH" 2>/dev/null)"
   llm_postprocess
   log_diagnostics "$ENGINE" "$RAW_OUTPUT" "$STATIC_OUTPUT"
+  append_history || true
   printf '%s\n' "done" > "$STATUS_PATH"
 else
   log_diagnostics "$ENGINE" "$RAW_OUTPUT"

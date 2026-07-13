@@ -126,6 +126,22 @@ error. A length guard discards any runaway (ballooning) response.
 | `LLM_MAX_TOKENS` | `1024` | Max tokens for the cleanup response |
 | `DICTATION_LLM_PROMPT` | (built-in) | Override the system prompt (`LLM_SYSTEM_PROMPT`) |
 
+## Dictation history
+
+Every successful dictation appends one JSON line to
+`~/.local/share/whisper/history.jsonl` (oldest first), storing the **final,
+post-filtered text** and the **real engine** that produced it:
+
+```json
+{"ts":1752406325,"iso":"2026-07-13T14:32:05+03:00","text":"Проверка раз.","engine":"whisper.cpp","mode":"cut","dur":2.14}
+```
+
+The file is rotated to the last `DICTATION_HISTORY_MAX` lines (default `50`) and written
+`chmod 600` because it contains what you dictated. Set `DICTATION_HISTORY_MAX=0` to
+disable the journal entirely, or point `DICTATION_HISTORY_PATH` elsewhere. History is
+never written for ignored (too-short) or failed runs. Hammerspoon reads it newest-first
+via the global `dictationHistoryRead(limit)` (used by the menu bar).
+
 ## Diagnostics
 
 Every run leaves evidence, so when transcription misbehaves you can tell *what* broke:
