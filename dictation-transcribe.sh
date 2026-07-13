@@ -30,6 +30,11 @@ elif [ -n "${1:-}" ]; then
 fi
 
 # ---- configuration (override any of these via environment variables) ----
+# Hardware profile written by dictation-detect.sh --write-profile. Sourced first so
+# every ${VAR:-default} below still wins for runtime env, but picks up detected facts
+# and pre-resolved recommendations. Re-sourcing is idempotent and no-op-safe.
+PROFILE_PATH="${DICTATION_PROFILE:-$HOME/.local/share/whisper/profile.env}"
+[ -f "$PROFILE_PATH" ] && . "$PROFILE_PATH"
 FFMPEG_PATH="${FFMPEG_PATH:-/usr/local/bin/ffmpeg}"
 FFPROBE_PATH="${FFPROBE_PATH:-/usr/local/bin/ffprobe}"
 WHISPER_PATH="${WHISPER_PATH:-$HOME/.local/opt/whisper.cpp/build-metal/bin/whisper-cli}"
