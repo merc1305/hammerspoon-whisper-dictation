@@ -1,9 +1,10 @@
 #!/bin/bash
+# BEGIN_USAGE
 # install.sh — one-command installer for the whisper_own macOS dictation tool.
 #
 # Replaces the manual README steps with an idempotent wizard: detect hardware, install
 # brew deps, build/locate whisper.cpp (Metal), download models, set up the optional Groq
-# key, deploy the scripts, wire up Hammerspoon, and smoke-test the pipeline.
+# key, deploy the scripts, register Hammerspoon at login, and smoke-test the pipeline.
 #
 # Flags:
 #   --yes         assume "yes" to the confirmation prompt (non-interactive)
@@ -11,14 +12,17 @@
 #   --skip-local  do not build/clone whisper.cpp (Groq-only or already built)
 #   --reinstall   force re-download of models and rebuild of whisper.cpp
 #   --no-smoke    skip the final smoke test
+#   --autostart-only  only repair/register Hammerspoon login startup
 #   --dry-run     print every action without changing anything
 #   -h, --help    show this help
+# END_USAGE
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '/^# BEGIN_USAGE$/,/^# END_USAGE$/p' "${BASH_SOURCE[0]}" |
+    sed '1d;$d;s/^# \{0,1\}//'
 }
 
 # ---- flags ----
@@ -27,6 +31,7 @@ SKIP_BREW=0
 SKIP_LOCAL=0
 REINSTALL=0
 NO_SMOKE=0
+AUTOSTART_ONLY=0
 DRY_RUN=0
 for arg in "$@"; do
   case "$arg" in
@@ -35,6 +40,7 @@ for arg in "$@"; do
     --skip-local) SKIP_LOCAL=1 ;;
     --reinstall) REINSTALL=1 ;;
     --no-smoke) NO_SMOKE=1 ;;
+    --autostart-only) AUTOSTART_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h | --help)
       usage
@@ -61,6 +67,13 @@ VAD_MODEL_PATH="${VAD_MODEL_PATH:-$MODEL_DIR/ggml-silero-v5.1.2.bin}"
 VAD_URL="https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin"
 WHISPER_REPO="https://github.com/ggml-org/whisper.cpp"
 LOG_FILE="$MODEL_DIR/install.log"
+HAMMERSPOON_LAUNCH_LABEL="${HAMMERSPOON_LAUNCH_LABEL:-local.whisper-own.hammerspoon}"
+LAUNCH_AGENTS_DIR="${LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
+HAMMERSPOON_LAUNCH_PLIST="${HAMMERSPOON_LAUNCH_PLIST:-$LAUNCH_AGENTS_DIR/$HAMMERSPOON_LAUNCH_LABEL.plist}"
+LAUNCHCTL_BIN="${LAUNCHCTL_BIN:-/bin/launchctl}"
+OPEN_BIN="${OPEN_BIN:-/usr/bin/open}"
+PGREP_BIN="${PGREP_BIN:-/usr/bin/pgrep}"
+HAMMERSPOON_START_TIMEOUT="${HAMMERSPOON_START_TIMEOUT:-10}"
 
 # ---- output helpers ----
 if [ -t 1 ]; then
@@ -278,6 +291,105 @@ install_scripts() {
   ok "Hammerspoon config deployed: $dest"
 }
 
+find_hammerspoon_app() {
+  local candidate
+  if [ -n "${HAMMERSPOON_APP:-}" ]; then
+    [ -x "$HAMMERSPOON_APP/Contents/MacOS/Hammerspoon" ] ||
+      die "Hammerspoon app not found or invalid at HAMMERSPOON_APP=$HAMMERSPOON_APP" >&2
+    printf '%s\n' "$HAMMERSPOON_APP"
+    return 0
+  fi
+
+  for candidate in "/Applications/Hammerspoon.app" "$HOME/Applications/Hammerspoon.app"; do
+    if [ -x "$candidate/Contents/MacOS/Hammerspoon" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  if [ "$DRY_RUN" = "1" ]; then
+    warn "Hammerspoon.app is not present yet; assuming /Applications/Hammerspoon.app for preview" >&2
+    printf '%s\n' "/Applications/Hammerspoon.app"
+    return 0
+  fi
+  die "Hammerspoon.app not found or its executable is invalid after installation" >&2
+}
+
+install_hammerspoon_autostart() {
+  info "Registering Hammerspoon to start at login"
+  local app uid target tmp app_xml log_xml
+  app="$(find_hammerspoon_app)"
+  uid="$(id -u)"
+  target="gui/$uid/$HAMMERSPOON_LAUNCH_LABEL"
+
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '  [dry-run] write %s (RunAtLoad -> %s)\n' "$HAMMERSPOON_LAUNCH_PLIST" "$app"
+    reload_hammerspoon_launch_agent "$uid" "$target"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$HAMMERSPOON_LAUNCH_PLIST")" "$MODEL_DIR"
+  tmp="$HAMMERSPOON_LAUNCH_PLIST.tmp.$$"
+  app_xml="$(printf '%s' "$app" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')"
+  log_xml="$(printf '%s' "$MODEL_DIR/hammerspoon-launch.log" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')"
+  cat > "$tmp" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$HAMMERSPOON_LAUNCH_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$OPEN_BIN</string>
+    <string>-gj</string>
+    <string>$app_xml</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>$log_xml</string>
+  <key>StandardErrorPath</key>
+  <string>$log_xml</string>
+</dict>
+</plist>
+EOF
+  plutil -lint "$tmp" >/dev/null
+  chmod 644 "$tmp"
+  mv "$tmp" "$HAMMERSPOON_LAUNCH_PLIST"
+
+  reload_hammerspoon_launch_agent "$uid" "$target"
+  wait_for_hammerspoon_start
+  ok "Hammerspoon autostart registered: $HAMMERSPOON_LAUNCH_PLIST"
+}
+
+reload_hammerspoon_launch_agent() {
+  local uid="$1" target="$2"
+  if [ "$DRY_RUN" = "1" ]; then
+    run "$LAUNCHCTL_BIN" bootout "$target" || true
+  else
+    "$LAUNCHCTL_BIN" bootout "$target" >/dev/null 2>&1 || true
+  fi
+  run "$LAUNCHCTL_BIN" enable "$target"
+  run "$LAUNCHCTL_BIN" bootstrap "gui/$uid" "$HAMMERSPOON_LAUNCH_PLIST"
+  run "$LAUNCHCTL_BIN" kickstart -k "$target"
+}
+
+wait_for_hammerspoon_start() {
+  local waited=0
+  while ! "$PGREP_BIN" -x Hammerspoon >/dev/null 2>&1; do
+    if [ "$waited" -ge "$HAMMERSPOON_START_TIMEOUT" ]; then
+      die "Hammerspoon did not start within ${HAMMERSPOON_START_TIMEOUT}s; check $MODEL_DIR/hammerspoon-launch.log"
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
 print_permissions() {
   info "Permissions"
   cat <<EOF
@@ -350,6 +462,7 @@ final_summary() {
   cat <<EOF
   worker:    $LOCAL_BIN/dictation-transcribe.sh
   config:    $HAMMERSPOON_DIR/init.lua
+  autostart: $HAMMERSPOON_LAUNCH_PLIST
   profile:   $PROFILE_PATH
   models:    $MODEL_DIR
 Next: open Hammerspoon, grant Accessibility + Microphone, Reload Config, then hold fn and speak.
@@ -359,6 +472,10 @@ EOF
 main() {
   [ "$DRY_RUN" = "1" ] && warn "DRY RUN — no changes will be made"
   require_macos
+  if [ "$AUTOSTART_ONLY" = "1" ]; then
+    install_hammerspoon_autostart
+    return 0
+  fi
   detect_brew_prefix
   run_autodetect
   confirm
@@ -367,6 +484,7 @@ main() {
   download_models
   setup_groq_key
   install_scripts
+  install_hammerspoon_autostart
   print_permissions
   run_smoke_test
   link_skill
