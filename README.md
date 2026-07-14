@@ -55,7 +55,9 @@ There's also a Claude Code skill in [`skill/whisper-dictation/`](skill/whisper-d
 
 ## Configuration at a glance
 
-- **Trigger:** `triggerMode = "ptt"` (hold `fn`) or `"toggle"` (tap to start/stop) in `init.lua`.
+- **Trigger:** click the menu-bar icon → **Settings** → choose **Push-to-talk** (hold `fn`)
+  or **Toggle** (tap once to start, again to stop). The choice applies immediately and is
+  remembered across Hammerspoon reloads and app updates.
 - **Language:** `DICTATION_LANGUAGE=auto` (RU+EN autodetect, no translation) — see [docs/model-policy.md](docs/model-policy.md).
 - **Smart cleanup:** `DICTATION_LLM_CLEANUP=1` for an optional Groq-Llama punctuation/filler pass (fail-open) — see [docs/architecture.md](docs/architecture.md#post-processing-success-branch).
 - **History:** `~/.local/share/whisper/history.jsonl` (last 50, `chmod 600`); the menu-bar dropdown lists them.

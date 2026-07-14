@@ -33,7 +33,15 @@ local bytesPerSecond = 32000 -- 16 kHz * mono * s16 (2 bytes)
 local maxBufferBytes = 256 * 1024 * 1024 -- ~2.2 hours, then the buffer is rotated
 
 -- trigger mode: "ptt" (hold fn) is the default; "toggle" = tap fn to start, tap to stop.
+-- The menu-bar setting is stored outside this file so it survives config reloads/updates.
+local triggerModeSettingKey = "whisperDictation.triggerMode"
 local triggerMode = "ptt"
+if hs.settings and hs.settings.get then
+  local savedTriggerMode = hs.settings.get(triggerModeSettingKey)
+  if savedTriggerMode == "ptt" or savedTriggerMode == "toggle" then
+    triggerMode = savedTriggerMode
+  end
+end
 local toggleMaxSeconds = 300 -- safety auto-stop if a toggle session is left running
 local toggleStartAlert = true -- brief on-screen hint when a toggle session starts
 local hotkeyWatchdogInterval = 2 -- seconds between health checks of the fn event tap
@@ -59,6 +67,37 @@ local captureSizeAtPress = 0
 local capturePressedAt = 0
 local capturePollTimer = nil
 local toggleAutoStopTimer = nil -- auto-stop timer for an active toggle session
+
+local function triggerModeLabel(mode)
+  return (mode == "toggle") and "Toggle" or "Push-to-talk"
+end
+
+local function setTriggerMode(mode)
+  if mode ~= "ptt" and mode ~= "toggle" then
+    return false
+  end
+  if captureActive then
+    hs.alert.closeAll(0)
+    hs.alert.show("Stop the current dictation before changing mode")
+    return false
+  end
+
+  triggerMode = mode
+  if hs.settings and hs.settings.set then
+    hs.settings.set(triggerModeSettingKey, mode)
+  end
+  if dictationMenubar then
+    dictationMenubar:setTooltip("Whisper dictation — " .. triggerModeLabel(mode))
+  end
+
+  hs.alert.closeAll(0)
+  if mode == "toggle" then
+    hs.alert.show("Mode: Toggle — tap fn to start or stop")
+  else
+    hs.alert.show("Mode: Push-to-talk — hold fn to speak")
+  end
+  return true
+end
 
 local function trim(text)
   return (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -125,12 +164,24 @@ local function indicatorEnsureCanvas()
   if not indicatorCanvas then
     indicatorCanvas = hs.canvas.new(indicatorFrame())
     indicatorCanvas:level("overlay")
-    indicatorCanvas:behavior({ "canJoinAllSpaces", "stationary", "ignoresCycle" })
+    indicatorCanvas:behavior({
+      "canJoinAllSpaces",
+      "fullScreenAuxiliary",
+      "stationary",
+      "ignoresCycle",
+    })
   else
     indicatorCanvas:frame(indicatorFrame())
   end
 
   return indicatorCanvas
+end
+
+local function indicatorPresent()
+  local canvas = indicatorEnsureCanvas()
+  -- hs.canvas:show() asks AppKit to make a shape-only window key, which current
+  -- macOS refuses. orderAbove() displays the overlay without activating it.
+  canvas:orderAbove()
 end
 
 local function indicatorDot(cx, cy, diameter, color)
@@ -225,7 +276,7 @@ local function indicatorShowAnimated(state, interval)
   indicatorState = state
   indicatorTick = 0
   indicatorRender()
-  indicatorEnsureCanvas():show()
+  indicatorPresent()
   indicatorTimer = hs.timer.doEvery(interval, indicatorRender)
 end
 
@@ -235,7 +286,7 @@ local function indicatorPulse(state, duration)
   indicatorState = state
   indicatorTick = 0
   indicatorRender()
-  indicatorEnsureCanvas():show()
+  indicatorPresent()
   indicatorHideTimer = hs.timer.doAfter(duration, indicatorHide)
 end
 
@@ -430,8 +481,7 @@ end
 -- Built fresh every time the menu opens (passed to setMenu as a function).
 local function menubarBuildMenu()
   local menu = {}
-  local modeLabel = (triggerMode == "toggle") and "Toggle" or "Push-to-talk"
-  menu[#menu + 1] = { title = "Dictation — " .. modeLabel, disabled = true }
+  menu[#menu + 1] = { title = "Dictation — " .. triggerModeLabel(triggerMode), disabled = true }
   menu[#menu + 1] = { title = "-" }
 
   local entries = menubarHistoryEntries()
@@ -470,7 +520,25 @@ local function menubarBuildMenu()
   }
 
   menu[#menu + 1] = { title = "-" }
-  menu[#menu + 1] = { title = "Settings: edit ~/.hammerspoon/init.lua", disabled = true }
+  menu[#menu + 1] = {
+    title = "Settings",
+    menu = {
+      {
+        title = "Push-to-talk — hold fn",
+        checked = (triggerMode == "ptt"),
+        disabled = captureActive,
+        fn = function() setTriggerMode("ptt") end,
+      },
+      {
+        title = "Toggle — tap fn to start / stop",
+        checked = (triggerMode == "toggle"),
+        disabled = captureActive,
+        fn = function() setTriggerMode("toggle") end,
+      },
+      { title = "-" },
+      { title = "Advanced: edit ~/.hammerspoon/init.lua", disabled = true },
+    },
+  }
   menu[#menu + 1] = { title = "Reload config", fn = function() hs.reload() end }
 
   return menu
@@ -872,7 +940,7 @@ if menubarEnabled then
   dictationMenubar = hs.menubar.new()
   if dictationMenubar then
     dictationMenubar:setMenu(menubarBuildMenu)
-    dictationMenubar:setTooltip("Whisper dictation")
+    dictationMenubar:setTooltip("Whisper dictation — " .. triggerModeLabel(triggerMode))
     setMenubarState("idle")
   end
 end

@@ -3,6 +3,10 @@
 Everything resolves as **runtime env > `~/.local/share/whisper/profile.env` > policy >
 built-in defaults**. There is no model menu — see [engine-policy.md](engine-policy.md).
 
+The recording trigger is the user-facing exception: click the menu-bar icon → **Settings**
+and choose **Push-to-talk** or **Toggle**. The change applies immediately and is persisted
+by Hammerspoon under `whisperDictation.triggerMode`; no config edit or Reload is required.
+
 ## `init.lua` knobs (top of the file)
 
 | Knob | Default | What it does / when to change |
@@ -13,7 +17,7 @@ built-in defaults**. There is no model menu — see [engine-policy.md](engine-po
 | `prerollSeconds` | `0.5` | How far back the pre-roll reaches. Lower trims latency but risks clipping the first syllable. |
 | `bytesPerSecond` | `32000` | Buffer byte-rate (16 kHz mono s16). Must match the recorder format — do not change casually. |
 | `maxBufferBytes` | `256 MB` | Ring-buffer rotation threshold. |
-| `triggerMode` | `"ptt"` | `"ptt"` (hold `fn`) or `"toggle"` (tap to start/stop). |
+| `triggerMode` | `"ptt"` | Runtime trigger mode and fallback default. Prefer the menu-bar **Settings** control; a valid saved UI choice (`"ptt"` or `"toggle"`) overrides this value. |
 | `toggleMaxSeconds` | `300` | Safety auto-stop for a toggle session left running. |
 | `toggleStartAlert` | `true` | Brief hint when a toggle session starts. |
 | `hotkeyWatchdogInterval` | `2` | Seconds between fn-tap health checks. |

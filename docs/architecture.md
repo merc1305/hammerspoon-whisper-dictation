@@ -94,7 +94,9 @@ Each successful dictation appends one JSON line to
 global `dictationHistoryRead(limit)`; the menu-bar dropdown lists the recent dictations and
 lets you copy one again (no auto-paste). The menu-bar icon has three states driven by the
 same indicator choke-points as the on-screen dot: grey ring (idle), red dot (recording),
-orange dot (transcribing).
+orange dot (transcribing). Its **Settings** submenu switches between push-to-talk and
+toggle recording immediately; the validated choice is persisted with `hs.settings` under
+`whisperDictation.triggerMode`, so config reloads and installer updates keep it.
 
 ## Two independent watchdogs
 
