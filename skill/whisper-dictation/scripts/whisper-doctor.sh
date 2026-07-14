@@ -32,6 +32,8 @@ MODEL_PATH="${MODEL_PATH:-$HOME/.local/share/whisper/ggml-large-v3-turbo-q5_0.bi
 VAD_MODEL_PATH="${VAD_MODEL_PATH:-$HOME/.local/share/whisper/ggml-silero-v5.1.2.bin}"
 GROQ_KEY_PATH="${GROQ_KEY_PATH:-$HOME/.hammerspoon/groq_api_key}"
 LAST_LOG="${LAST_LOG_PATH:-$HOME/.local/share/whisper/last.log}"
+HAMMERSPOON_LAUNCH_LABEL="${HAMMERSPOON_LAUNCH_LABEL:-local.whisper-own.hammerspoon}"
+HAMMERSPOON_LAUNCH_PLIST="${HAMMERSPOON_LAUNCH_PLIST:-$HOME/Library/LaunchAgents/$HAMMERSPOON_LAUNCH_LABEL.plist}"
 
 printf 'whisper-dictation doctor (read-only)\n'
 printf '====================================\n'
@@ -43,6 +45,16 @@ elif pgrep -x Hammerspoon >/dev/null 2>&1; then
   pass "Hammerspoon running"
 else
   warn "Hammerspoon.app not found (checked /Applications and ~/Applications)"
+fi
+if [ -f "$HAMMERSPOON_LAUNCH_PLIST" ] && plutil -lint "$HAMMERSPOON_LAUNCH_PLIST" >/dev/null 2>&1; then
+  pass "Hammerspoon autostart plist is valid"
+else
+  warn "Hammerspoon autostart missing or invalid at $HAMMERSPOON_LAUNCH_PLIST"
+fi
+if launchctl print "gui/$(id -u)/$HAMMERSPOON_LAUNCH_LABEL" >/dev/null 2>&1; then
+  pass "Hammerspoon autostart is registered with launchd"
+else
+  warn "Hammerspoon autostart is not registered with launchd"
 fi
 
 # ffmpeg / ffprobe

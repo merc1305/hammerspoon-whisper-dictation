@@ -33,12 +33,14 @@ no cross-platform runtime.
 6. installs the worker to `~/.local/bin/dictation-transcribe.sh` (plus the policy library
    and detector), backs up any existing `~/.hammerspoon/init.lua`, deploys the new one,
    and rewrites its `ffmpegPath` to the detected ffmpeg;
-7. opens the two permission panes;
-8. runs a **smoke test** (`say` → wav → worker) and checks `status=done`.
+7. registers `~/Library/LaunchAgents/local.whisper-own.hammerspoon.plist`, starts
+   Hammerspoon now, and starts it automatically after every macOS login;
+8. opens the two permission panes;
+9. runs a **smoke test** (`say` → wav → worker) and checks `status=done`.
 
 Flags: `--yes` (non-interactive), `--skip-brew`, `--skip-local` (Groq-only / already
-built), `--reinstall` (force re-download + rebuild), `--no-smoke`, `--dry-run` (preview,
-change nothing).
+built), `--reinstall` (force re-download + rebuild), `--no-smoke`, `--autostart-only`
+(repair login startup without reinstalling anything), `--dry-run` (preview, change nothing).
 
 ## Permissions
 
@@ -50,6 +52,10 @@ Grant Hammerspoon two permissions in **System Settings → Privacy & Security**:
   (`Privacy & Security → Microphone`).
 
 Then open Hammerspoon and **Reload Config**.
+
+The installer owns the `local.whisper-own.hammerspoon` LaunchAgent instead of relying on
+Hammerspoon's preference checkbox alone. This keeps startup deterministic if macOS loses
+the corresponding background-item registration after an app update or reboot.
 
 ## Smoke test by hand
 
@@ -104,6 +110,8 @@ Then grant permissions (above) and Reload Config.
 ```bash
 rm -f ~/.local/bin/dictation-transcribe.sh ~/.local/bin/dictation-model-policy.sh \
       ~/.local/bin/dictation-detect.sh
+launchctl bootout "gui/$(id -u)/local.whisper-own.hammerspoon" 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/local.whisper-own.hammerspoon.plist
 rm -rf ~/.local/share/whisper ~/.local/opt/whisper.cpp
 # restore your previous Hammerspoon config from the ~/.hammerspoon/init.lua.bak-* backup
 ```

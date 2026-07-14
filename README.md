@@ -38,7 +38,7 @@ The recorder is only ever stopped with SIGINT (graceful; ffmpeg finalizes output
 ./install.sh          # --yes for non-interactive, --dry-run to preview
 ```
 
-Detects your hardware, installs the parts, builds/locates whisper.cpp, downloads the models, wires up Hammerspoon (backing up any existing config), and smoke-tests the pipeline. Then grant Hammerspoon **Accessibility** + **Microphone**, Reload Config, and hold `fn`. Full walkthrough → [docs/install-mac.md](docs/install-mac.md).
+Detects your hardware, installs the parts, builds/locates whisper.cpp, downloads the models, wires up Hammerspoon (backing up any existing config), registers it to start automatically after login, and smoke-tests the pipeline. Then grant Hammerspoon **Accessibility** + **Microphone**, Reload Config, and hold `fn`. Full walkthrough → [docs/install-mac.md](docs/install-mac.md).
 
 ## Documentation
 
