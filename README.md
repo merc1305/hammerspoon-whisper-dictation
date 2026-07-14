@@ -2,19 +2,13 @@
 
 Push-to-talk voice dictation for macOS: **hold `fn` — speak — release — the text is pasted into whatever app you're in.**
 
-Built from three off-the-shelf parts — [Hammerspoon](https://www.hammerspoon.org/), ffmpeg, and [whisper.cpp](https://github.com/ggml-org/whisper.cpp) — with an optional [Groq API](https://groq.com/) fast path. No Electron, no menu-bar app, no subscription: one Lua config and one shell script.
+Built from three off-the-shelf parts — [Hammerspoon](https://www.hammerspoon.org/), ffmpeg, and [whisper.cpp](https://github.com/ggml-org/whisper.cpp) — with an optional [Groq API](https://groq.com/) fast path. No Electron, no subscription: one Lua config and one shell script. **macOS only.**
 
 ## Why another Whisper dictation?
 
-Two problems most DIY (and some commercial) setups get wrong:
+**1. Cold-start clipping.** If you launch the recorder when the hotkey goes down, the first half-second of speech is lost while ffmpeg opens the audio device. Here, **ffmpeg runs continuously**, appending raw PCM to a ring-buffer file. Pressing `fn` just remembers the current byte offset (minus a 0.5 s pre-roll); releasing it cuts the byte range out of the buffer. Recording latency is zero because the recording never stops.
 
-**1. Cold-start clipping.** If you launch the recorder when the hotkey goes down, the first half-second of speech is lost while ffmpeg opens the audio device. Here, **ffmpeg runs continuously**, appending raw PCM to a ring-buffer file. Pressing `fn` just remembers the current byte offset (minus a 0.5 s pre-roll); releasing it cuts the byte range out of the buffer. Recording latency is zero because the recording never stops. A watchdog restarts the recorder if it stalls, after system sleep, and when the default microphone changes.
-
-**2. Whisper hallucinations on pauses.** On silence, Whisper famously emits YouTube-subtitle boilerplate — *"Thanks for watching!"*, and in Russian *«Продолжение следует...»*, *«Субтитры сделал DimaTorzok»* — and can drop real speech in the process. This pipeline attacks that at three levels:
-
-   - **Silero VAD** (`--vad --vad-model`) cuts silence *before* decoding, so Whisper never sees the pauses it likes to hallucinate on;
-   - **`-mc 0`** stops decoded text from being carried as context into the next 30-second window (context contamination is how one hallucination snowballs into a truncated transcript). Note: recent whisper-cli builds have no `--no-context` flag — `-mc 0` is the equivalent;
-   - a **post-filter** strips known hallucination lines from the final text — this also covers the cloud engine, which hallucinates the same phrases.
+**2. Whisper hallucinations on pauses.** On silence, Whisper emits YouTube-subtitle boilerplate — *"Thanks for watching!"*, *«Продолжение следует…»* — and can drop real speech doing it. This pipeline attacks that at five levels (Silero VAD, `-mc 0`, `-sns`, a static post-filter, and an optional Groq-Llama cleanup pass). See [docs/known-issues.md](docs/known-issues.md).
 
 ## Architecture
 
@@ -29,9 +23,8 @@ Two problems most DIY (and some commercial) setups get wrong:
                                       │
                     ┌─────────────────▼───────────────────────────┐
                     │ dictation-transcribe.sh                     │
-                    │   1. Groq API (whisper-large-v3), if key    │
-                    │   2. local whisper-cli (VAD + -mc 0 + -sns) │
-                    │   3. hallucination post-filter              │
+                    │   engine dispatch: mlx → whisper.cpp → groq │
+                    │   → static filter → optional LLM cleanup    │
                     └─────────────────┬───────────────────────────┘
                                       │
                           clipboard ──▶ Cmd+V into the active app
@@ -39,72 +32,46 @@ Two problems most DIY (and some commercial) setups get wrong:
 
 The recorder is only ever stopped with SIGINT (graceful; ffmpeg finalizes output). SIGKILL would truncate the recording tail.
 
-## Setup
+## Quick install
 
-1. **Install the parts:**
+```bash
+./install.sh          # --yes for non-interactive, --dry-run to preview
+```
 
-   ```bash
-   brew install hammerspoon ffmpeg
-   ```
+Detects your hardware, installs the parts, builds/locates whisper.cpp, downloads the models, wires up Hammerspoon (backing up any existing config), and smoke-tests the pipeline. Then grant Hammerspoon **Accessibility** + **Microphone**, Reload Config, and hold `fn`. Full walkthrough → [docs/install-mac.md](docs/install-mac.md).
 
-2. **Build whisper.cpp with Metal** (or adjust `WHISPER_PATH` to an existing build):
+## Documentation
 
-   ```bash
-   git clone https://github.com/ggml-org/whisper.cpp ~/.local/opt/whisper.cpp
-   cd ~/.local/opt/whisper.cpp
-   cmake -B build-metal -DGGML_METAL=ON
-   cmake --build build-metal -j --config Release
-   ```
+Full docs live in [`docs/`](docs/README.md):
 
-3. **Download the models:**
+- **[docs/install-mac.md](docs/install-mac.md)** — one-command install, manual fallback, permissions, smoke test, uninstall
+- **[docs/architecture.md](docs/architecture.md)** — the ring buffer, the IPC files, the engine dispatcher, post-processing, history + menu bar, the two watchdogs
+- **[docs/model-policy.md](docs/model-policy.md)** — no model menu; the tier→engine/model table; turbo vs large-v3; RU+EN autodetect
+- **[docs/speed-tuning.md](docs/speed-tuning.md)** — the latency budget and every knob that moves it
+- **[docs/known-issues.md](docs/known-issues.md)** — Whisper hallucinations and the five defenses; the fn tap after sleep; permissions; a diagnostics cheat-sheet
+- **[docs/cost-comparison.md](docs/cost-comparison.md)** — Groq free tier vs OpenAI vs fully local
 
-   ```bash
-   mkdir -p ~/.local/share/whisper
-   # speech model (any ggml whisper model works; this one is a good speed/quality balance)
-   curl -L -o ~/.local/share/whisper/ggml-large-v3-turbo-q5_0.bin \
-     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
-   # Silero VAD model — note: VAD models live in the ggml-org/whisper-vad repo,
-   # NOT in ggerganov/whisper.cpp (that URL 404s)
-   curl -L -o ~/.local/share/whisper/ggml-silero-v5.1.2.bin \
-     https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
-   ```
+There's also a Claude Code skill in [`skill/whisper-dictation/`](skill/whisper-dictation/) that can install, configure and debug the tool.
 
-4. **Install the scripts:**
+## Configuration at a glance
 
-   ```bash
-   install -m 755 dictation-transcribe.sh ~/.local/bin/dictation-transcribe.sh
-   cp init.lua ~/.hammerspoon/init.lua   # or merge into your existing config
-   ```
+- **Trigger:** `triggerMode = "ptt"` (hold `fn`) or `"toggle"` (tap to start/stop) in `init.lua`.
+- **Language:** `DICTATION_LANGUAGE=auto` (RU+EN autodetect, no translation) — see [docs/model-policy.md](docs/model-policy.md).
+- **Smart cleanup:** `DICTATION_LLM_CLEANUP=1` for an optional Groq-Llama punctuation/filler pass (fail-open) — see [docs/architecture.md](docs/architecture.md#post-processing-success-branch).
+- **History:** `~/.local/share/whisper/history.jsonl` (last 50, `chmod 600`); the menu-bar dropdown lists them.
+- Everything resolves as **runtime env > `profile.env` > policy > built-in defaults**. Run `dictation-transcribe.sh --print-policy` to see what's active.
 
-5. **Optional — Groq fast path.** Put an API key into `~/.hammerspoon/groq_api_key` (`chmod 600`). With a key, transcription goes through Groq's hosted `whisper-large-v3` (sub-second) and falls back to local whisper.cpp on any failure. Without a key it's 100 % local.
+## Claude Code skill
 
-6. Launch Hammerspoon, grant it **Accessibility** and **Microphone** permissions, and hold `fn` to dictate.
+A [Claude Code](https://claude.com/claude-code) skill lives in
+[`skill/whisper-dictation/`](skill/whisper-dictation/) — it can install, configure and
+debug this tool (including a read-only `whisper-doctor.sh` health check). Make it available:
 
-## Configuration
+```bash
+ln -s "$(pwd)/skill/whisper-dictation" ~/.claude/skills/whisper-dictation
+```
 
-Everything lives at the top of the two files:
-
-- `init.lua` — paths, pre-roll, minimum hold duration, indicator colors, the `fn` trigger key.
-- `dictation-transcribe.sh` — every path and knob is an environment variable (`WHISPER_PATH`, `MODEL_PATH`, `VAD_MODEL_PATH`, `GROQ_MODEL`, `DICTATION_PROMPT`, `HALLUCINATION_PHRASES`, …). The prompt steers language mix and punctuation; the default is tuned for mixed Russian/English dictation — change it for your languages.
-
-## Diagnostics
-
-Every run leaves evidence, so when transcription misbehaves you can tell *what* broke:
-
-- `/tmp/dictation-last.wav` — the exact audio of the last dictation (was the recording truncated, or the transcription?);
-- `~/.local/share/whisper/last.log` — timestamp, engine used (groq/local), audio duration, raw engine output, and the post-filtered text when the filter changed anything;
-- `/tmp/dictation.err` — stderr of the current run.
-
-## Про галлюцинации Whisper («Продолжение следует...»)
-
-Если ваша русская диктовка через Whisper обрывается на середине, а в конце появляется «Продолжение следует...», «Спасибо за просмотр!», «Субтитры сделал DimaTorzok» или «Редактор субтитров А.Синецкая» — это известная галлюцинация модели: Whisper обучался на YouTube-субтитрах и на паузах/тишине воспроизводит их типовые концовки. Заражение контекстом между 30-секундными окнами превращает одну галлюцинацию в обрезанный транскрипт.
-
-Что помогает (всё это реализовано здесь):
-
-1. **VAD (Silero)** — вырезать тишину до распознавания: `--vad --vad-model ggml-silero-v5.1.2.bin`;
-2. **`-mc 0`** — не передавать распознанный текст как контекст следующему окну (в свежих сборках whisper-cli флага `--no-context` нет, `-mc 0` — его эквивалент);
-3. **`-sns`** — подавить не-речевые токены;
-4. **Пост-фильтр** известных фраз-галлюцинаций — список настраивается через переменную `HALLUCINATION_PHRASES`.
+`install.sh` offers to create this symlink for you.
 
 ## License
 
