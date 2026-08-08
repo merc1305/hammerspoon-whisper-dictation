@@ -265,4 +265,24 @@ doctor_warn="$(
 assert_contains "$doctor_warn" "WARN  Hammerspoon autostart missing or invalid"
 assert_contains "$doctor_warn" "WARN  Hammerspoon autostart is not registered with launchd"
 
+# A proxy-level 403 must not be misreported as a dead key when the same key works direct.
+printf 'diagnostic-test-key\n' > "$DOCTOR_HOME/no-key"
+CURL_STUB="$TMP/curl"
+cat > "$CURL_STUB" <<'EOF'
+#!/bin/bash
+case " $* " in
+  *" --noproxy api.groq.com "*) printf '200' ;;
+  *) printf '403' ;;
+esac
+EOF
+chmod +x "$CURL_STUB"
+doctor_proxy="$(
+  HOME="$DOCTOR_HOME" PATH="$TMP:$PATH" DICTATION_PROFILE="$DOCTOR_PROFILE" \
+    HAMMERSPOON_LAUNCH_PLIST="$PLIST" LAUNCHCTL_LOG="$TMP/doctor-proxy.log" \
+    LAUNCHCTL_STATE="$LAUNCHCTL_STATE" https_proxy="http://127.0.0.1:7897" \
+    bash "$ROOT/skill/whisper-dictation/scripts/whisper-doctor.sh"
+)"
+assert_contains "$doctor_proxy" \
+  "WARN  Groq key valid, but configured proxy route returned HTTP 403 (direct HTTP 200)"
+
 printf 'PASS install autostart + failure paths + doctor checks\n'

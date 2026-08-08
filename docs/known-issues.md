@@ -76,6 +76,10 @@ tail -n 20 ~/.local/share/whisper/last.log
 
 The key must be at `~/.hammerspoon/groq_api_key`, `chmod 600`.
 
+If `whisper-doctor.sh` reports that the key works direct but the configured proxy route is
+rejected, fix the central proxy/`NO_PROXY` policy and restart Hammerspoon so it inherits the
+updated environment. That is a routing failure, not an expired Groq key.
+
 ## No VAD model → runs without VAD
 
 If `ggml-silero-v5.1.2.bin` is missing, the local engine logs "running without VAD" to

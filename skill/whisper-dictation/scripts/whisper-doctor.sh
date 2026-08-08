@@ -102,9 +102,20 @@ if [ -n "${GROQ_API_KEY:-}" ] || [ -s "$GROQ_KEY_PATH" ]; then
   key="${GROQ_API_KEY:-$(tr -d '[:space:]' < "$GROQ_KEY_PATH" 2>/dev/null)}"
   code="$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer $key" https://api.groq.com/openai/v1/models 2>/dev/null || echo 000)"
+  direct_code=""
+  if [ "$code" != "200" ] && \
+      [ -n "${http_proxy:-}${https_proxy:-}${all_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}" ]; then
+    # A proxy/WAF rejection and a revoked key can both look like HTTP 403. Retry once
+    # without the configured proxy so the diagnosis names the broken layer correctly.
+    direct_code="$(curl --noproxy api.groq.com -s --max-time 2 -o /dev/null \
+      -w '%{http_code}' -H "Authorization: Bearer $key" \
+      https://api.groq.com/openai/v1/models 2>/dev/null || echo 000)"
+  fi
   if [ "$code" = "200" ]; then
     pass "Groq key valid (HTTP 200)"
     GROQ_OK=1
+  elif [ "$direct_code" = "200" ]; then
+    warn "Groq key valid, but configured proxy route returned HTTP $code (direct HTTP 200)"
   elif [ "$code" = "000" ]; then
     warn "Groq key present but endpoint unreachable (timeout/offline)"
     GROQ_OK=1
