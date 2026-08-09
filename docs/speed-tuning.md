@@ -29,8 +29,8 @@ tail -n 20 ~/.local/share/whisper/last.log
 
 `transcribe_local` runs `whisper-cli` with:
 
-- `-t 8` — threads (tune to your core count via `WHISPER_THREADS`);
-- `-ng` — no GPU offload flag toggling / greedy path for short clips;
+- `-t "$WHISPER_THREADS"` — threads from the detected profile (and benchmark-tunable);
+- `-ng` on CPU profiles; Apple Silicon Metal profiles leave GPU offload enabled;
 - `-bs 1 -bo 1` — beam size / best-of 1: greedy, lowest latency;
 - `-nf` — no fallback temperature sweeps;
 - `-mc 0` — carry **no** decoded context into the next 30 s window (the main
@@ -42,10 +42,12 @@ tail -n 20 ~/.local/share/whisper/last.log
 
 ## Model choice
 
-The universal model is `ggml-large-v3-turbo-q5_0.bin` — **turbo is ~8× faster than
+The Apple-capable default is `ggml-large-v3-turbo-q5_0.bin` — **turbo is ~8× faster than
 large-v3** with near-identical Russian quality, and `q5_0` quantization keeps it small and
 fast. A strong Apple Silicon machine with `mlx_whisper` can use the `mlx` engine
 (`mlx-community/whisper-large-v3-turbo`) instead. See [model-policy.md](model-policy.md).
+CPU-only Intel profiles use multilingual `ggml-small-q5_1.bin`, which is substantially
+faster than turbo on that hardware without the large quality drop seen with `base`.
 
 ## Knobs in `init.lua`
 

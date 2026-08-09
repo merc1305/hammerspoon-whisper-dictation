@@ -32,6 +32,7 @@ PROFILE_PATH="${PROFILE_PATH:-$MODEL_DIR/profile.env}"
 # NOTE: the plan specified ggml-org/whisper.cpp, but that repo 401s for these .bin files;
 # the models actually live in ggerganov/whisper.cpp (verified 200/206). Using that.
 REC_MODEL_DEFAULT="ggml-large-v3-turbo-q5_0.bin"
+REC_MODEL_WEAK="ggml-small-q5_1.bin"
 REC_MODEL_URL_BASE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 
 # ---- pure probes (no side effects) ----
@@ -160,9 +161,13 @@ recommend() {
   # Never emit an empty order — fall back to the canonical safe default.
   [ -n "$REC_ORDER" ] || REC_ORDER="groq whisper.cpp"
 
-  # Local model preference. Universal = turbo-q5; large-v3 only on strong + RAM>=24.
+  # Local model preference. CPU-only machines need a substantially smaller fallback to
+  # keep interactive dictation responsive; Apple-capable machines keep turbo-q5, while
+  # strong Apple Silicon with ample RAM can afford large-v3-q5.
   if [ "$DICT_TIER" = "apple-strong" ] && [ "$DICT_RAM_GB" -ge 24 ]; then
     REC_MODEL="ggml-large-v3-q5_0.bin"
+  elif [ "$DICT_TIER" = "weak" ]; then
+    REC_MODEL="$REC_MODEL_WEAK"
   else
     REC_MODEL="$REC_MODEL_DEFAULT"
   fi

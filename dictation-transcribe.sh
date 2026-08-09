@@ -48,6 +48,8 @@ FFMPEG_PATH="${FFMPEG_PATH:-/usr/local/bin/ffmpeg}"
 FFPROBE_PATH="${FFPROBE_PATH:-/usr/local/bin/ffprobe}"
 WHISPER_PATH="${WHISPER_PATH:-$HOME/.local/opt/whisper.cpp/build-metal/bin/whisper-cli}"
 MODEL_PATH="${MODEL_PATH:-$HOME/.local/share/whisper/ggml-large-v3-turbo-q5_0.bin}"
+WHISPER_THREADS="${WHISPER_THREADS:-8}"
+DICTATION_COMPUTE="${DICTATION_COMPUTE:-cpu}"
 # Silero VAD model — download from https://huggingface.co/ggml-org/whisper-vad
 VAD_MODEL_PATH="${VAD_MODEL_PATH:-$HOME/.local/share/whisper/ggml-silero-v5.1.2.bin}"
 LAST_LOG_PATH="${LAST_LOG_PATH:-$HOME/.local/share/whisper/last.log}"
@@ -127,10 +129,10 @@ thanks?\s+for\s+watching
 subtitles\s+by}"
 # -------------------------------------------------------------------------
 
-OUT_PATH="/tmp/dictation.txt"
-ERR_PATH="/tmp/dictation.err"
-STATUS_PATH="/tmp/dictation.status"
-PID_PATH="/tmp/dictation-whisper.pid"
+OUT_PATH="${OUT_PATH:-/tmp/dictation.txt}"
+ERR_PATH="${ERR_PATH:-/tmp/dictation.err}"
+STATUS_PATH="${STATUS_PATH:-/tmp/dictation.status}"
+PID_PATH="${PID_PATH:-/tmp/dictation-whisper.pid}"
 
 if [ "$MODE" = "print-policy" ]; then
   # Diagnostics: show the resolved policy without touching any IPC file.
@@ -140,6 +142,8 @@ if [ "$MODE" = "print-policy" ]; then
   printf 'DICTATION_ENGINE_ORDER=%s\n' "$DICTATION_ENGINE_ORDER"
   printf 'MODEL_PATH=%s\n' "$MODEL_PATH"
   printf 'GROQ_MODEL=%s\n' "$GROQ_MODEL"
+  printf 'WHISPER_THREADS=%s\n' "$WHISPER_THREADS"
+  printf 'DICTATION_COMPUTE=%s\n' "$DICTATION_COMPUTE"
   printf 'MODEL_PATH_EXISTS=%s\n' "$model_exists"
   exit 0
 fi
@@ -326,14 +330,24 @@ transcribe_local() {
     printf 'VAD model missing at %s, running without VAD\n' "$VAD_MODEL_PATH" >> "$ERR_PATH"
   fi
 
+  # The generated profile decides whether this machine should use CPU-only decoding or
+  # GPU offload. Keep -ng on Intel, where the Metal path can be slower, but do not
+  # accidentally disable Metal on Apple Silicon. WHISPER_THREADS is benchmark-tunable
+  # per machine and was previously documented but ignored here because -t was hardcoded.
+  local compute_args=()
+  case "$DICTATION_COMPUTE" in
+    metal | gpu) ;;
+    *) compute_args=(-ng) ;;
+  esac
+
   "$WHISPER_PATH" \
     -m "$MODEL_PATH" \
     -f "$AUDIO_PATH" \
     -l "$DICTATION_LANGUAGE" \
     -nt \
     -np \
-    -t 8 \
-    -ng \
+    -t "$WHISPER_THREADS" \
+    ${compute_args[@]+"${compute_args[@]}"} \
     -bs 1 \
     -bo 1 \
     -nf \

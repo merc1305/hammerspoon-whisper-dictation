@@ -11,7 +11,7 @@
 #   |-------------------------------|----------------------|---------------------------|
 #   | apple-strong + mlx            | mlx whisper.cpp groq | turbo → turbo-q5 → large   |
 #   | apple-strong / apple-capable  | whisper.cpp groq     | turbo-q5 → turbo → large   |
-#   | weak / empty                  | groq whisper.cpp     | turbo-q5 (fallback)       |
+#   | weak / empty                  | groq whisper.cpp     | small-q5 -> small -> turbo |
 
 MODEL_DIR="${MODEL_DIR:-$HOME/.local/share/whisper}"
 
@@ -19,6 +19,7 @@ MODEL_DIR="${MODEL_DIR:-$HOME/.local/share/whisper}"
 # machine may prefer the un-quantized turbo.
 DICT_LOCAL_MODEL_PREFERENCE_DEFAULT="${DICT_LOCAL_MODEL_PREFERENCE_DEFAULT:-ggml-large-v3-turbo-q5_0.bin ggml-large-v3-turbo.bin ggml-large-v3-q5_0.bin ggml-large-v3.bin}"
 DICT_LOCAL_MODEL_PREFERENCE_STRONG="${DICT_LOCAL_MODEL_PREFERENCE_STRONG:-ggml-large-v3-turbo.bin ggml-large-v3-turbo-q5_0.bin ggml-large-v3.bin}"
+DICT_LOCAL_MODEL_PREFERENCE_WEAK="${DICT_LOCAL_MODEL_PREFERENCE_WEAK:-ggml-small-q5_1.bin ggml-small.bin ggml-large-v3-turbo-q5_0.bin ggml-large-v3-turbo.bin}"
 
 # Echo the first model file from $1 (a space-separated name list) that exists in MODEL_DIR.
 _first_present_model() {
@@ -60,6 +61,8 @@ resolve_model_policy() {
     local pref="$DICT_LOCAL_MODEL_PREFERENCE_DEFAULT"
     if [ "$tier" = "apple-strong" ]; then
       pref="$DICT_LOCAL_MODEL_PREFERENCE_STRONG"
+    elif [ "$tier" = "weak" ]; then
+      pref="$DICT_LOCAL_MODEL_PREFERENCE_WEAK"
     fi
     local found
     if found="$(_first_present_model "$pref")"; then

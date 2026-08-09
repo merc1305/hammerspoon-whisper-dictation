@@ -12,8 +12,8 @@ knob — you tune behavior, not model files.
 |---|---|---|---|
 | **apple-strong** + mlx | arm64, RAM ≥ 16, `mlx_whisper` present | `mlx whisper.cpp groq` | turbo → turbo-q5 → large-v3 |
 | **apple-strong / apple-capable** | arm64, whisper.cpp built with Metal | `whisper.cpp groq` | turbo-q5 → turbo → large-v3 |
-| **weak** | Intel / low RAM / no Metal build | `groq whisper.cpp` | turbo-q5 (offline fallback) |
-| empty | no key, no build | `groq whisper.cpp` | turbo-q5 (default path) |
+| **weak** | Intel / low RAM / no Metal build | `groq whisper.cpp` | small-q5 → small → turbo-q5 |
+| empty | no key, no build | `groq whisper.cpp` | small-q5 (default CPU path) |
 
 - Cloud model: `GROQ_MODEL=whisper-large-v3`.
 - Local tokens: `mlx | whisper.cpp | groq` — the winning one is written verbatim to
@@ -21,11 +21,17 @@ knob — you tune behavior, not model files.
 
 ## turbo vs large-v3
 
-The universal model is **`ggml-large-v3-turbo-q5_0.bin`**. Turbo trades a hair of accuracy
+The Apple-capable default is **`ggml-large-v3-turbo-q5_0.bin`**. Turbo trades a hair of accuracy
 for a large latency win — on Russian it is roughly on par with large-v3 while being about
 **8× faster to decode**. `q5_0` is a 5-bit quantization that keeps the file ~560 MB and the
 decode fast. large-v3 is only worth it on a strong Apple Silicon machine with plenty of RAM,
 which the policy table already accounts for.
+
+CPU-only Intel machines use multilingual **`ggml-small-q5_1.bin`** as their offline model.
+On the Intel i9-9980HK reference machine it transcribed a representative 20-second Russian
+clip in about 7 seconds versus about 21 seconds for turbo-q5, while staying close to the
+turbo transcript. The smaller `base` model was faster but made materially more recognition
+errors, so it is not selected.
 
 Rough word-error-rate reference (Russian, illustrative — benchmarks vary by dataset):
 
