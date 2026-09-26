@@ -840,6 +840,11 @@ finishCapture = function(notice)
   captureActive = false
   captureFinalizing = true
   captureNotice = notice
+  if notice then
+    -- Warn as soon as capture is interrupted, even if recognition takes minutes.
+    hs.alert.closeAll(0)
+    hs.alert.show(notice, 6)
+  end
   if dictationMenubar then dictationMenubar:setTitle("") end
   local holdDuration = hs.timer.secondsSinceEpoch() - capturePressedAt
 

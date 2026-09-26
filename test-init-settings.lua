@@ -365,6 +365,7 @@ assertEqual(#workers(), 1, "rapid Fn presses cannot race the finalization")
 loadConfig(); advance(1); fn(true); fn(false); advance(2)
 growing = false; advance(20)
 assertEqual(#workers(), 1, "stalled recorder audio salvaged")
+assert(alerts[#alerts]:find("Microphone stalled"), "warn before recognition finishes")
 complete("Before microphone stalled")
 assert(alerts[#alerts]:find("Microphone stalled"), "hardware interruption warning missing")
 
