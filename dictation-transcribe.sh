@@ -1,9 +1,12 @@
 #!/bin/bash
 set -u
+umask 077
 
 # dictation-transcribe.sh — transcription worker for the Hammerspoon dictation pipeline.
 #
 # Modes:
+#   dictation-transcribe.sh --job DIR ...               — isolate all job IPC/artifacts
+#   dictation-transcribe.sh --retry                     — retry the saved live recording
 #   dictation-transcribe.sh /path/to/audio.wav            — transcribe an existing file
 #   dictation-transcribe.sh --cut BUFFER START END        — cut bytes [START, END) out of
 #     a raw ring buffer (s16le 16kHz mono), wrap into WAV and transcribe
@@ -19,6 +22,11 @@ set -u
 MODE="file"
 AUDIO_PATH="/tmp/dictation.wav"
 SLICE_PATH="/tmp/dictation-slice.raw"
+JOB_DIR=""
+if [ "${1:-}" = "--job" ]; then
+  JOB_DIR="${2:?job directory required}"
+  shift 2
+fi
 
 if [ "${1:-}" = "--cut" ]; then
   MODE="cut"
@@ -27,6 +35,8 @@ if [ "${1:-}" = "--cut" ]; then
   END_BYTES="${4:?end bytes required}"
 elif [ "${1:-}" = "--print-policy" ]; then
   MODE="print-policy"
+elif [ "${1:-}" = "--retry" ]; then
+  MODE="retry"
 elif [ -n "${1:-}" ]; then
   AUDIO_PATH="$1"
 fi
@@ -53,10 +63,11 @@ DICTATION_COMPUTE="${DICTATION_COMPUTE:-cpu}"
 # Silero VAD model — download from https://huggingface.co/ggml-org/whisper-vad
 VAD_MODEL_PATH="${VAD_MODEL_PATH:-$HOME/.local/share/whisper/ggml-silero-v5.1.2.bin}"
 LAST_LOG_PATH="${LAST_LOG_PATH:-$HOME/.local/share/whisper/last.log}"
-LAST_WAV_PATH="${LAST_WAV_PATH:-/tmp/dictation-last.wav}"
+LAST_WAV_PATH="${LAST_WAV_PATH:-$HOME/.local/share/whisper/last.wav}"
+RECORDINGS_DIR="${DICTATION_RECORDINGS_DIR:-$HOME/.local/share/whisper/recordings}"
 GROQ_KEY_PATH="${GROQ_KEY_PATH:-$HOME/.hammerspoon/groq_api_key}"
 GROQ_MODEL="${GROQ_MODEL:-whisper-large-v3}"
-GROQ_ENDPOINT="https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_ENDPOINT="${GROQ_ENDPOINT:-https://api.groq.com/openai/v1/audio/transcriptions}"
 MIN_AUDIO_SECONDS="${MIN_AUDIO_SECONDS:-0.75}"
 
 # ---- dictation history (see plan §2.5) ----
@@ -80,8 +91,8 @@ MLX_MODEL="${MLX_MODEL:-mlx-community/whisper-large-v3-turbo}"
 
 # ---- optional LLM cleanup (Groq Llama second pass; flag-gated, fail-open) ----
 # When DICTATION_LLM_CLEANUP=1, the static-filtered text is sent ONCE to a small Groq
-# chat model to fix punctuation/case/fillers. It never adds meaning and degrades
-# gracefully to the static text on any problem (no key, timeout, HTTP error, runaway).
+# chat model to fix punctuation/case/fillers. A lexical guard rejects content changes;
+# any problem leaves the static text intact (no key, timeout, HTTP error, truncation).
 DICTATION_LLM_CLEANUP="${DICTATION_LLM_CLEANUP:-0}"
 # Model note: llama-3.1-8b-instant (the original pick) reliably TRANSLATED Russian<->English
 # and dropped content, breaking the bilingual "meaning intact" contract. llama-3.3-70b-
@@ -118,8 +129,8 @@ DICTATION_LANGUAGE="${DICTATION_LANGUAGE:-auto}"
 PROMPT="${DICTATION_PROMPT:-Russian-English dictation. Keep Russian as Russian and English words as English. Add punctuation. Use question marks for questions. Examples: Проверка диктовки. Today is Tuesday. Всё работает локально. Почему не ставится вопросительный знак?}"
 
 # Known Whisper hallucination phrases (YouTube-subtitle boilerplate that Whisper emits
-# on silence/pauses). One regex per line; matched case-insensitively; the match and
-# everything after it on the same line is removed. Add your own for your language.
+# on silence/pauses). One regex per line; matched case-insensitively. Only a response
+# made entirely of these phrases and punctuation is discarded.
 HALLUCINATION_PHRASES="${HALLUCINATION_PHRASES:-продолжение\s+следует
 спасибо\s+за\s+просмотр
 субтитры\s+сделал
@@ -148,10 +159,39 @@ if [ "$MODE" = "print-policy" ]; then
   exit 0
 fi
 
+# Every attempt owns its audio, intermediates and transcript. A late process can never
+# overwrite a newer UI job. Legacy IPC overrides remain available for CLI consumers.
+mkdir -p "$RECORDINGS_DIR" || exit 1
+if [ -z "$JOB_DIR" ]; then
+  JOB_DIR="$(mktemp -d "$RECORDINGS_DIR/$(date '+%Y%m%d-%H%M%S').XXXXXX")" || exit 1
+else
+  if [ -e "$JOB_DIR/audio.wav" ]; then
+    printf 'Refusing to overwrite an existing recording: %s\n' "$JOB_DIR" >&2
+    exit 1
+  fi
+  mkdir -p "$JOB_DIR" || exit 1
+  OUT_PATH="$JOB_DIR/transcript.txt"
+  ERR_PATH="$JOB_DIR/error.log"
+  STATUS_PATH="$JOB_DIR/status"
+  PID_PATH="$JOB_DIR/pid"
+  ENGINE_PATH="$JOB_DIR/engine"
+fi
+SLICE_PATH="$JOB_DIR/slice.raw"
+
 printf '%s\n' "$$" > "$PID_PATH"
 printf '%s\n' "running" > "$STATUS_PATH"
 : > "$OUT_PATH"
 : > "$ERR_PATH"
+
+# Unexpected shell/runtime failures must not leave a permanent 'running' status.
+worker_exit() {
+  local rc=$?
+  if [ "$(cat "$STATUS_PATH" 2>/dev/null)" = "running" ]; then
+    printf 'error:worker-exit-%s\n' "$rc" > "$STATUS_PATH"
+  fi
+  rm -f "$PID_PATH"
+}
+trap worker_exit EXIT
 
 finish_ignored() {
   printf 'ignored: %s\n' "$1" >> "$ERR_PATH"
@@ -161,12 +201,14 @@ finish_ignored() {
 }
 
 finish_error() {
+  printf '%s\n' "$1" >> "$ERR_PATH"
   printf '%s\n' "error:$1" > "$STATUS_PATH"
   rm -f "$PID_PATH"
   exit 1
 }
 
 if [ "$MODE" = "cut" ]; then
+  AUDIO_PATH="$JOB_DIR/audio.wav"
   if [ ! -f "$BUFFER_PATH" ]; then
     finish_error "buffer-missing"
   fi
@@ -176,11 +218,24 @@ if [ "$MODE" = "cut" ]; then
     finish_ignored "empty slice"
   fi
 
-  tail -c +"$((START_BYTES + 1))" "$BUFFER_PATH" | head -c "$SLICE_LENGTH" > "$SLICE_PATH"
-
-  if [ ! -s "$SLICE_PATH" ]; then
-    finish_ignored "slice is empty"
-  fi
+  # Read an exact bounded snapshot, even while ffmpeg keeps appending. Never accept a
+  # short read as a successful recording (rotation/truncation used to go unnoticed).
+  /usr/bin/python3 - "$BUFFER_PATH" "$SLICE_PATH" "$START_BYTES" "$END_BYTES" <<'PY' 2>> "$ERR_PATH"
+import shutil, sys
+src, dst, start, end = sys.argv[1:]
+start, end = int(start), int(end)
+assert 0 <= start < end and start % 2 == end % 2 == 0
+with open(src, 'rb') as source, open(dst, 'wb') as target:
+    source.seek(start)
+    remaining = end - start
+    while remaining:
+        block = source.read(min(1024 * 1024, remaining))
+        if not block:
+            raise IOError('Recording buffer ended before the requested boundary')
+        target.write(block)
+        remaining -= len(block)
+PY
+  [ "$?" -eq 0 ] || finish_error "incomplete-recording"
 
   if ! "$FFMPEG_PATH" -y -hide_banner -loglevel error \
       -f s16le -ar 16000 -ac 1 \
@@ -189,7 +244,28 @@ if [ "$MODE" = "cut" ]; then
   fi
 
   rm -f "$SLICE_PATH"
+else
+  if [ "$MODE" = "retry" ]; then
+    AUDIO_PATH="$LAST_WAV_PATH"
+  fi
+  cp "$AUDIO_PATH" "$JOB_DIR/audio.wav" 2>> "$ERR_PATH" || finish_error "audio-missing"
+  AUDIO_PATH="$JOB_DIR/audio.wav"
 fi
+
+# Commit the recovery copy BEFORE any network/model work. Retrying a failure always
+# reads this exact recording, not a moving ring buffer or a partial text result.
+if [ "$MODE" = "cut" ]; then
+  /usr/bin/python3 - "$AUDIO_PATH" "$LAST_WAV_PATH" <<'PY' 2>> "$ERR_PATH"
+import os, sys
+src, dst = sys.argv[1:]
+os.makedirs(os.path.dirname(dst), exist_ok=True)
+tmp = dst + '.tmp.' + str(os.getpid())
+os.symlink(os.path.abspath(src), tmp)
+os.replace(tmp, dst)
+PY
+  [ "$?" -eq 0 ] || finish_error "audio-backup"
+fi
+printf '%s\n' "$AUDIO_PATH" > "$JOB_DIR/audio-ready"
 
 read_groq_key() {
   if [ -n "${GROQ_API_KEY:-}" ]; then
@@ -259,8 +335,8 @@ transcribe_groq() {
     return 2
   fi
 
-  json_path="/tmp/dictation.groq.json"
-  http_path="/tmp/dictation.groq.http"
+  json_path="$JOB_DIR/groq.json"
+  http_path="$JOB_DIR/groq.http"
   : > "$json_path"
 
   # Only send a language field when a specific language is forced; 'auto' means let Groq
@@ -274,6 +350,8 @@ transcribe_groq() {
     --silent \
     --show-error \
     --max-time 60 \
+    --connect-timeout 10 \
+    --retry 2 --retry-delay 1 --retry-max-time 150 \
     --output "$json_path" \
     --write-out '%{http_code}' \
     --request POST "$GROQ_ENDPOINT" \
@@ -308,6 +386,26 @@ transcribe_groq() {
   return 0
 }
 
+# Bound local engines too: a wedged decoder must eventually expose a retryable error.
+# Each child has its own process group so timeout cleanup cannot kill other dictations.
+run_bounded() {
+  /usr/bin/python3 - "$@" <<'PY'
+import os, signal, subprocess, sys
+process = subprocess.Popen(sys.argv[1:], start_new_session=True)
+try:
+    sys.exit(process.wait(timeout=900))
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+    print('Local transcription timed out; original audio is saved', file=sys.stderr)
+    sys.exit(124)
+PY
+}
+
 transcribe_local() {
   # Availability probe: no binary or no model file → unavailable, skip to the next engine.
   if [ ! -x "$WHISPER_PATH" ] || [ ! -f "$MODEL_PATH" ]; then
@@ -340,7 +438,7 @@ transcribe_local() {
     *) compute_args=(-ng) ;;
   esac
 
-  "$WHISPER_PATH" \
+  run_bounded "$WHISPER_PATH" \
     -m "$MODEL_PATH" \
     -f "$AUDIO_PATH" \
     -l "$DICTATION_LANGUAGE" \
@@ -364,8 +462,7 @@ transcribe_local() {
 transcribe_mlx() {
   command -v "$MLX_WHISPER_BIN" >/dev/null 2>&1 || return 2
 
-  local mlx_dir="/tmp/dictation-mlx"
-  rm -rf "$mlx_dir" 2>/dev/null
+  local mlx_dir="$JOB_DIR/mlx"
   mkdir -p "$mlx_dir"
 
   # Only pass --language when a specific language is forced; omit it for RU+EN autodetect.
@@ -374,7 +471,7 @@ transcribe_mlx() {
     lang_args=(--language "$DICTATION_LANGUAGE")
   fi
 
-  "$MLX_WHISPER_BIN" "$AUDIO_PATH" \
+  run_bounded "$MLX_WHISPER_BIN" "$AUDIO_PATH" \
     --model "$MLX_MODEL" \
     --output-dir "$mlx_dir" \
     --output-format json \
@@ -417,28 +514,15 @@ try:
 except FileNotFoundError:
     sys.exit(0)
 
-# Phrase stems. Real occurrences drag a tail behind them ("Субтитры сделал
-# DimaTorzok", "Продолжение следует...") — so we cut from the phrase start
-# to the end of the line.
+# Only discard an entire response consisting solely of boilerplate. A phrase inside
+# real speech is not evidence that the rest of a story should be deleted.
 phrases = [p.strip() for p in os.environ.get("HALLUCINATION_PHRASES", "").splitlines() if p.strip()]
 if not phrases:
     sys.exit(0)
 pattern = re.compile("|".join(phrases), re.IGNORECASE | re.UNICODE)
 
-cleaned_lines = []
-for line in text.splitlines():
-    m = pattern.search(line)
-    if m:
-        # cut from the phrase to end of line, keeping any real text before it
-        line = line[: m.start()]
-        # drop dangling connective punctuation left by the cut
-        line = re.sub(r"[\s,;:\-–—…]+$", "", line)
-    stripped = line.strip()
-    # drop lines that became empty or are punctuation-only
-    if stripped and re.search(r"\w", stripped, re.UNICODE):
-        cleaned_lines.append(line.rstrip())
-
-result = "\n".join(cleaned_lines).strip()
+remainder = pattern.sub('', text)
+result = '' if not re.search(r'\w', remainder) else text.strip()
 with open(path, "w", encoding="utf-8") as f:
     f.write(result)
     if result:
@@ -463,8 +547,8 @@ llm_postprocess() {
     return 0
   fi
 
-  local req_path="/tmp/dictation.llm.req.json"
-  local resp_path="/tmp/dictation.llm.resp.json"
+  local req_path="$JOB_DIR/llm.req.json"
+  local resp_path="$JOB_DIR/llm.resp.json"
 
   # Build the chat/completions request with python (safe JSON escaping of the text).
   GROQ_LLM_MODEL="$GROQ_LLM_MODEL" LLM_MAX_TOKENS="$LLM_MAX_TOKENS" \
@@ -523,7 +607,10 @@ try:
         original = f.read().strip()
     with open(resp_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    content = data["choices"][0]["message"]["content"]
+    choice = data["choices"][0]
+    if choice.get("finish_reason") != "stop":
+        sys.exit(0)  # token limit / interrupted response: keep the entire original
+    content = choice["message"]["content"]
 except Exception:
     sys.exit(0)  # keep original
 
@@ -542,6 +629,14 @@ if not cleaned:
 # "answering" instead of cleaning)
 if len(cleaned) > max(40, 2 * len(original)):
     sys.exit(0)  # keep original
+
+# Cleanup may change punctuation/case and remove fillers, but never summarize or
+# silently lose a middle paragraph. Length ratios alone cannot detect that loss.
+fillers = {'эм', 'ммм', 'ну', 'вот', 'uh', 'um', 'er'}
+def words(value):
+    return [w for w in re.findall(r'\w+', value.casefold()) if w not in fillers]
+if words(original) != words(cleaned):
+    sys.exit(0)
 
 with open(out_path, "w", encoding="utf-8") as f:
     f.write(cleaned)
@@ -583,7 +678,7 @@ append_history() {
 
   local dur
   dur="$(audio_duration_seconds)"
-  HIST_ENGINE="$ENGINE" HIST_MODE="$MODE" HIST_DUR="$dur" HIST_MAX="$HISTORY_MAX" \
+  HIST_ENGINE="$ENGINE" HIST_MODE="$MODE" HIST_DUR="$dur" HIST_MAX="$HISTORY_MAX" HIST_AUDIO="$FULL_AUDIO_PATH" \
     /usr/bin/python3 - "$OUT_PATH" "$HISTORY_PATH" <<'PY' 2>> "$ERR_PATH"
 import datetime, json, os, sys, time
 out_path, hist_path = sys.argv[1], sys.argv[2]
@@ -612,6 +707,7 @@ entry = {
     "engine": os.environ.get("HIST_ENGINE", "") or "unknown",
     "mode": os.environ.get("HIST_MODE", "") or "file",
     "dur": dur,
+    "audio": os.environ.get("HIST_AUDIO", ""),
 }
 line = json.dumps(entry, ensure_ascii=False)
 
@@ -649,49 +745,94 @@ run_engine() {
   esac
 }
 
-# Try each engine in DICTATION_ENGINE_ORDER: rc 0 wins, rc 2 = unavailable (skip),
-# anything else = failure → fall back to the next. $ENGINE holds the winning token
-# verbatim (e.g. "whisper.cpp", not the old "local").
-exit_code=1
-ENGINE="none"
-for engine in $DICTATION_ENGINE_ORDER; do
-  run_engine "$engine"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    exit_code=0
-    ENGINE="$engine"
-    break
-  elif [ "$rc" -eq 2 ]; then
-    printf -- '--- engine %s unavailable (skip) ---\n' "$engine" >> "$ERR_PATH"
-  else
-    printf -- '--- engine %s failed rc=%s, falling back ---\n' "$engine" "$rc" >> "$ERR_PATH"
-  fi
-done
-
-# Raw engine output BEFORE the post-filter — so the log shows whether the engine
-# itself hallucinated.
-RAW_OUTPUT="$(cat "$OUT_PATH" 2>/dev/null)"
-
-if [ "$exit_code" -eq 0 ]; then
-  # §2.7 invariant: record the winning engine immediately, before any post-processing.
-  # B1/C1 rewrite this block and MUST keep this line.
-  printf '%s' "$ENGINE" > "$ENGINE_PATH"
-  clean_hallucinations
-  STATIC_OUTPUT="$(cat "$OUT_PATH" 2>/dev/null)"
-  llm_postprocess
-  log_diagnostics "$ENGINE" "$RAW_OUTPUT" "$STATIC_OUTPUT"
-  append_history || true
-  printf '%s\n' "done" > "$STATUS_PATH"
+# Normalize long audio into consecutive, lossless chunks. Choose the quietest 100 ms
+# boundary in the last 15 seconds of each two-minute window. Every sample belongs to
+# exactly one chunk; no text deduplication can accidentally erase a repeated sentence.
+FULL_AUDIO_PATH="$AUDIO_PATH"
+FULL_OUT_PATH="$OUT_PATH"
+mkdir -p "$JOB_DIR/chunks"
+DURATION="$(audio_duration_seconds)"
+if /usr/bin/python3 - "$DURATION" <<'PYLONG'
+import sys
+sys.exit(0 if float(sys.argv[1] or 0) > 120 else 1)
+PYLONG
+then
+  "$FFMPEG_PATH" -y -hide_banner -loglevel error -i "$AUDIO_PATH" \
+    -ar 16000 -ac 1 -c:a pcm_s16le "$JOB_DIR/normalized.wav" 2>> "$ERR_PATH" || finish_error "normalize"
+  /usr/bin/python3 - "$JOB_DIR/normalized.wav" "$JOB_DIR/chunks" <<'PYCHUNKS' 2>> "$ERR_PATH"
+import array, os, sys, wave
+src, directory = sys.argv[1:]
+with wave.open(src, 'rb') as source:
+    rate, total = source.getframerate(), source.getnframes()
+    start, index = 0, 0
+    while start < total:
+        end = min(start + 120 * rate, total)
+        if end < total:
+            low = end - 15 * rate
+            source.setpos(low)
+            samples = array.array('h', source.readframes(end - low))
+            if sys.byteorder != 'little': samples.byteswap()
+            window = rate // 10
+            # Minimum-energy window, closest to the end on ties (including silence).
+            offset = min(range(0, len(samples) - window + 1, window),
+                         key=lambda i: (sum(v*v for v in samples[i:i+window]), -i))
+            end = low + offset + window // 2
+        source.setpos(start)
+        with wave.open(os.path.join(directory, f'{index:05d}.wav'), 'wb') as target:
+            target.setparams(source.getparams())
+            target.writeframes(source.readframes(end - start))
+        start, index = end, index + 1
+PYCHUNKS
+  [ "$?" -eq 0 ] || finish_error "chunking"
+  rm -f "$JOB_DIR/normalized.wav"
 else
-  log_diagnostics "$ENGINE" "$RAW_OUTPUT"
-  printf 'error:%s\n' "$exit_code" > "$STATUS_PATH"
+  ln "$AUDIO_PATH" "$JOB_DIR/chunks/00000.wav" || finish_error "audio-copy"
 fi
 
-# Diagnostics: keep the transcribed wav as -last.wav (live dictation only) instead of
-# deleting it. On the next failure you can tell whether the recording itself was
-# truncated or the transcription lost the tail.
-if [ "$MODE" = "cut" ] && [ -f "$AUDIO_PATH" ]; then
-  mv -f "$AUDIO_PATH" "$LAST_WAV_PATH" 2>/dev/null
+# Do not publish partial success. Persist each chunk and progress for diagnosis/retry;
+# the UI receives 'done' only when every chunk has completed successfully.
+ENGINE="none"
+chunk_count=0
+for chunk in "$JOB_DIR"/chunks/*.wav; do chunk_count=$((chunk_count + 1)); done
+chunk_index=0
+: > "$JOB_DIR/raw.txt"
+: > "$JOB_DIR/combined.txt"
+for chunk in "$JOB_DIR"/chunks/*.wav; do
+  chunk_index=$((chunk_index + 1))
+  printf '%s/%s\n' "$chunk_index" "$chunk_count" > "$JOB_DIR/progress"
+  AUDIO_PATH="$chunk"
+  OUT_PATH="${chunk%.wav}.txt"
+  exit_code=1
+  for engine in $DICTATION_ENGINE_ORDER; do
+    : > "$OUT_PATH"
+    run_engine "$engine"
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -s "$OUT_PATH" ]; then
+      exit_code=0
+      ENGINE="$engine"
+      break
+    fi
+    printf -- '--- chunk %s engine %s failed/unavailable rc=%s ---\n' "$chunk_index" "$engine" "$rc" >> "$ERR_PATH"
+  done
+  [ "$exit_code" -eq 0 ] || finish_error "chunk-${chunk_index}-of-${chunk_count}"
+  cat "$OUT_PATH" >> "$JOB_DIR/raw.txt"
+  printf '\n' >> "$JOB_DIR/raw.txt"
+  clean_hallucinations
+  cat "$OUT_PATH" >> "$JOB_DIR/combined.txt"
+  printf '\n' >> "$JOB_DIR/combined.txt"
+done
+AUDIO_PATH="$FULL_AUDIO_PATH"
+OUT_PATH="$FULL_OUT_PATH"
+cp "$JOB_DIR/combined.txt" "$OUT_PATH" || finish_error "result-write"
+RAW_OUTPUT="$(cat "$JOB_DIR/raw.txt")"
+printf '%s' "$ENGINE" > "$ENGINE_PATH"
+STATIC_OUTPUT="$(cat "$OUT_PATH")"
+llm_postprocess
+log_diagnostics "$ENGINE" "$RAW_OUTPUT" "$STATIC_OUTPUT"
+append_history || true
+# Keep the archive transcript even when a legacy CLI caller overrides OUT_PATH.
+if [ "$OUT_PATH" != "$JOB_DIR/transcript.txt" ]; then
+  cp "$OUT_PATH" "$JOB_DIR/transcript.txt"
 fi
-
 rm -f "$PID_PATH"
+printf '%s\n' "done" > "$STATUS_PATH"

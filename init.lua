@@ -9,6 +9,9 @@
 -- the byte range out and hands it to dictation-transcribe.sh (Groq API first,
 -- local whisper.cpp as fallback).
 
+-- Local CLI diagnostics and recovery without enabling AppleScript execution.
+require("hs.ipc")
+
 local ffmpegPath = "/usr/local/bin/ffmpeg"
 -- install.sh rewrites the line above to the detected brew ffmpeg. If the path is missing
 -- anyway (e.g. a manual copy onto Apple Silicon, where brew lives in /opt/homebrew),
@@ -20,11 +23,13 @@ if not hs.fs.attributes(ffmpegPath) then
   end
 end
 local transcribeScriptPath = os.getenv("HOME") .. "/.local/bin/dictation-transcribe.sh"
-local bufferPath = "/tmp/dictation-buffer.raw"
-local resultPath = "/tmp/dictation.txt"
-local errorPath = "/tmp/dictation.err"
-local statusPath = "/tmp/dictation.status"
-local pidPath = "/tmp/dictation-whisper.pid"
+local dataPath = os.getenv("HOME") .. "/.local/share/whisper"
+local recordingsPath = dataPath .. "/recordings"
+local bufferPath = dataPath .. "/capture-buffer.raw"
+local captureJournalPath = dataPath .. "/active-capture.json"
+local lastWavPath = dataPath .. "/last.wav"
+hs.fs.mkdir(dataPath)
+hs.fs.mkdir(recordingsPath)
 local historyPath = os.getenv("HOME") .. "/.local/share/whisper/history.jsonl"
 
 local minDurationSeconds = 0.5
@@ -42,13 +47,13 @@ if hs.settings and hs.settings.get then
     triggerMode = savedTriggerMode
   end
 end
-local toggleMaxSeconds = 300 -- safety auto-stop if a toggle session is left running
 local toggleStartAlert = true -- brief on-screen hint when a toggle session starts
 local hotkeyWatchdogInterval = 2 -- seconds between health checks of the fn event tap
 local menubarEnabled = true -- show a menu-bar icon (in addition to the on-screen dot)
 local menubarHistoryCount = 10 -- how many recent dictations the dropdown lists
 
 local transcribing = false
+local activeJobPath = nil
 local fnWasDown = false
 local transcribePollTimer = nil
 local pasteTimer = nil
@@ -57,16 +62,30 @@ local pasteTimer = nil
 local recorderTask = nil
 local recorderStopping = false
 local recorderRestartTimer = nil
+local recorderNeedsRestart = false
 local lastBufferSize = 0
 local lastGrowthAt = 0
 
 -- current dictation state (fn held down)
-local captureActive = false
 local captureStartBytes = 0
+local captureActive = false
+local captureFinalizing = false
+local captureTarget = nil
+local captureNotice = nil
+local finishCapture, retryLastRecording
+local function shellQuote(value)
+  return "'" .. tostring(value):gsub("'", "'\"'\"'") .. "'"
+end
+local function saveCaptureJournal(endBytes)
+  local file = io.open(captureJournalPath .. ".tmp", "w")
+  if not file then return false end
+  file:write(hs.json.encode({ start = captureStartBytes, finish = endBytes }))
+  file:close()
+  return os.rename(captureJournalPath .. ".tmp", captureJournalPath)
+end
 local captureSizeAtPress = 0
 local capturePressedAt = 0
 local capturePollTimer = nil
-local toggleAutoStopTimer = nil -- auto-stop timer for an active toggle session
 
 local function triggerModeLabel(mode)
   return (mode == "toggle") and "Toggle" or "Push-to-talk"
@@ -481,6 +500,19 @@ end
 -- Built fresh every time the menu opens (passed to setMenu as a function).
 local function menubarBuildMenu()
   local menu = {}
+  if captureActive then
+    local seconds = math.floor(hs.timer.secondsSinceEpoch() - capturePressedAt)
+    menu[#menu + 1] = { title = string.format("Recording %d:%02d — stop and transcribe", math.floor(seconds / 60), seconds % 60), fn = function() finishCapture() end }
+  elseif transcribing or captureFinalizing then
+    menu[#menu + 1] = { title = "Transcribing — recording is saved", disabled = true }
+  end
+  menu[#menu + 1] = {
+    title = "Retry last recording — Ctrl+B",
+    disabled = captureActive or captureFinalizing or transcribing
+      or (not fileExists(lastWavPath) and not fileExists(captureJournalPath)),
+    fn = function() retryLastRecording() end,
+  }
+  menu[#menu + 1] = { title = "Open saved recordings", fn = function() hs.execute("/usr/bin/open " .. shellQuote(recordingsPath)) end }
   menu[#menu + 1] = { title = "Dictation — " .. triggerModeLabel(triggerMode), disabled = true }
   menu[#menu + 1] = { title = "-" }
 
@@ -559,7 +591,7 @@ local function defaultAudioInput()
   return ":0"
 end
 
-local function pasteText(text)
+local function pasteText(text, target)
   hs.pasteboard.setContents(text)
 
   if pasteTimer then
@@ -570,8 +602,10 @@ local function pasteText(text)
   pasteTimer = hs.timer.doAfter(0.25, function()
     pasteTimer = nil
     local app = hs.application.frontmostApplication()
-    if app then
-      app:activate()
+    if target and (not app or app:pid() ~= target.pid
+        or (target.window and (not hs.window.focusedWindow() or hs.window.focusedWindow():id() ~= target.window))) then
+      hs.alert.show("Text copied — focus changed. Use Cmd+V to paste")
+      return
     end
     hs.eventtap.keyStroke({ "cmd" }, "v", 0)
   end)
@@ -584,6 +618,7 @@ local function recorderIsRunning()
 end
 
 local function startRecorder()
+  if captureFinalizing or transcribing or fileExists(captureJournalPath) then return false end
   if recorderIsRunning() then
     return true
   end
@@ -599,7 +634,6 @@ local function startRecorder()
     "-i", defaultAudioInput(),
     "-ar", "16000",
     "-ac", "1",
-    "-af", "volume=12dB",
     "-f", "s16le",
     "-flush_packets", "1",
     bufferPath,
@@ -611,6 +645,9 @@ local function startRecorder()
       print("dictation recorder exited: " .. tostring(exitCode) .. " " .. tostring(stderr))
     end
     recorderStopping = false
+    if captureActive then
+      finishCapture("Microphone stopped — captured audio saved; retry with Ctrl+B")
+    end
   end, function()
     return true
   end, args)
@@ -637,10 +674,12 @@ local function stopRecorder()
 end
 
 local function restartRecorder()
-  if captureActive then
+  if captureActive or captureFinalizing or transcribing then
+    recorderNeedsRestart = true
     return
   end
 
+  recorderNeedsRestart = false
   stopRecorder()
 
   if recorderRestartTimer then
@@ -654,104 +693,128 @@ end
 
 -- ===== transcription =====
 
-local function transcribe(startBytes, endBytes)
-  if transcribing then
-    return
-  end
+local function transcribe(startBytes, endBytes, retry)
+  if transcribing then return end
   if not fileExists(transcribeScriptPath) then
-    showError("transcribe script not found")
+    captureFinalizing = false
+    showError("Transcribe script missing — audio remains in capture buffer")
     return
   end
-
   transcribing = true
   clearTranscribePollTimer()
   indicatorShowProcessing()
+  local target, notice = captureTarget, captureNotice
+  local jobPath = recordingsPath .. "/" .. os.date("%Y%m%d-%H%M%S") .. "-" .. hs.host.uuid()
+  activeJobPath = jobPath
+  hs.fs.mkdir(jobPath)
+  local resultPath, statusPath = jobPath .. "/transcript.txt", jobPath .. "/status"
+  local command = shellQuote(transcribeScriptPath) .. " --job " .. shellQuote(jobPath)
+  if retry then
+    command = command .. " --retry"
+  else
+    command = command .. string.format(" --cut %s %d %d", shellQuote(bufferPath), startBytes, endBytes)
+  end
+  local exited = false
+  dictationWorkerTask = hs.task.new("/bin/bash", function(code, stdout, stderr)
+    exited = true
+    if code ~= 0 then print("dictation worker exited: " .. tostring(code) .. " " .. tostring(stderr)) end
+  end, { "-l", "-c", command })
+  if not dictationWorkerTask or not dictationWorkerTask:start() then
+    transcribing, captureFinalizing = false, false
+    showError("Could not start transcription — recording remains saved")
+    return
+  end
 
-  os.remove(resultPath)
-  os.remove(errorPath)
-  os.remove(statusPath)
-  os.remove(pidPath)
-
-  local command = string.format(
-    "%q --cut %q %d %d >/dev/null 2>&1 &",
-    transcribeScriptPath, bufferPath, startBytes, endBytes
-  )
-  hs.execute(command, true)
-
-  local deadline = hs.timer.secondsSinceEpoch() + 180
   local poll
   local function schedulePoll()
-    clearTranscribePollTimer()
     transcribePollTimer = hs.timer.doAfter(0.2, poll)
   end
-
   poll = function()
     transcribePollTimer = nil
-
-    if not transcribing then
-      return
+    -- The worker acknowledges only after committing the complete recovery WAV.
+    if not retry and fileExists(jobPath .. "/audio-ready") then
+      os.remove(captureJournalPath)
+      captureFinalizing = false
     end
-
     local status = trim(readTextFile(statusPath))
-
-    if status == "done" then
-      transcribing = false
-
-      local text = trim(readTextFile(resultPath))
-      if text == "" then
-        showError("no speech recognized")
-        return
+    local progress = trim(readTextFile(jobPath .. "/progress"))
+    if dictationMenubar and progress ~= "" then dictationMenubar:setTitle("… " .. progress) end
+    if status == "done" or status == "ignored" or status:match("^error") or exited then
+      transcribing, captureFinalizing = false, false
+      if dictationMenubar then dictationMenubar:setTitle("") end
+      if status == "done" then
+        local text = trim(readTextFile(resultPath))
+        if text == "" then
+          showError("No speech recognized — audio saved; Ctrl+B to retry")
+        else
+          pasteText(text, target)
+          indicatorShowSuccess()
+          if notice then hs.alert.show(notice, 6) end
+        end
+      elseif status == "ignored" then
+        indicatorHide()
+      else
+        showError("Transcription failed — audio saved; Ctrl+B to retry")
+        print("transcribe failed: " .. readTextFile(jobPath .. "/error.log"))
       end
-
-      pasteText(text)
-      indicatorShowSuccess()
       return
     end
-
-    if status == "ignored" then
-      transcribing = false
-      indicatorHide()
-      return
-    end
-
-    if status:match("^error") then
-      transcribing = false
-      showError("transcription failed")
-      print("transcribe failed: " .. readTextFile(errorPath))
-      return
-    end
-
-    if hs.timer.secondsSinceEpoch() <= deadline then
-      schedulePoll()
-      return
-    end
-
-    transcribing = false
-
-    local pid = trim(readTextFile(pidPath))
-    if pid:match("^%d+$") then
-      hs.execute("/bin/kill -TERM " .. pid .. " >/dev/null 2>&1", true)
-    end
-
-    showError("transcription timed out")
+    schedulePoll()
   end
-
   schedulePoll()
+end
+
+local function rememberTarget()
+  local app = hs.application.frontmostApplication()
+  local window = hs.window.focusedWindow()
+  return app and { pid = app:pid(), window = window and window:id() } or nil
+end
+
+retryLastRecording = function()
+  if captureActive or captureFinalizing or transcribing then
+    hs.alert.show("Finish the current dictation first")
+    return
+  end
+  -- A failed snapshot/reload still has a journal and the original raw buffer.
+  local ok, pending = pcall(hs.json.decode, readTextFile(captureJournalPath))
+  captureTarget, captureNotice = rememberTarget(), nil
+  if ok and type(pending) == "table" and type(pending.start) == "number" then
+    transcribe(pending.start, pending.finish or alignDown(fileSize(bufferPath)))
+  elseif fileExists(lastWavPath) then
+    transcribe(nil, nil, true)
+  else
+    showError("No saved recording yet")
+  end
 end
 
 -- ===== fn-key dictation: cut a slice out of the buffer =====
 
 local function startCapture()
-  if captureActive or transcribing then
+  if captureActive or captureFinalizing or transcribing then
+    hs.alert.show("Please wait — the previous dictation is still processing")
+    return
+  end
+  if fileExists(captureJournalPath) then
+    showError("Unprocessed recording saved — Ctrl+B to recover it first")
+    return
+  end
+  if recorderNeedsRestart then
+    restartRecorder()
+    hs.alert.show("Microphone reconnecting — try Fn again in a moment")
     return
   end
 
+  captureTarget, captureNotice = rememberTarget(), nil
   captureActive = true
   capturePressedAt = hs.timer.secondsSinceEpoch()
 
   if not recorderIsRunning() then
     -- cold start: the recorder was somehow down, the beginning may get clipped
-    startRecorder()
+    if not startRecorder() then
+      captureActive = false
+      showError("Microphone could not start")
+      return
+    end
     captureSizeAtPress = 0
     captureStartBytes = 0
   else
@@ -760,22 +823,29 @@ local function startCapture()
     captureStartBytes = alignDown(math.max(0, captureSizeAtPress - preroll))
   end
 
+  if not saveCaptureJournal() then
+    captureActive = false
+    showError("Cannot save recording — check free disk space")
+    return
+  end
+  lastBufferSize, lastGrowthAt = fileSize(bufferPath), hs.timer.secondsSinceEpoch()
   indicatorShowRecording()
 end
 
-local function finishCapture()
+finishCapture = function(notice)
   if not captureActive then
     return
   end
 
   captureActive = false
-  if toggleAutoStopTimer then
-    toggleAutoStopTimer:stop()
-    toggleAutoStopTimer = nil
-  end
+  captureFinalizing = true
+  captureNotice = notice
+  if dictationMenubar then dictationMenubar:setTitle("") end
   local holdDuration = hs.timer.secondsSinceEpoch() - capturePressedAt
 
-  if holdDuration < minDurationSeconds then
+  if holdDuration < minDurationSeconds and not notice then
+    captureFinalizing = false
+    os.remove(captureJournalPath)
     indicatorHide()
     return
   end
@@ -799,10 +869,13 @@ local function finishCapture()
     if size >= targetBytes or hs.timer.secondsSinceEpoch() > pollDeadline then
       local endBytes = alignDown(size)
       if endBytes <= captureStartBytes then
-        showError("no audio captured")
+        captureFinalizing = false
+        showError("No audio captured — check the microphone")
+        os.remove(captureJournalPath)
         restartRecorder()
         return
       end
+      saveCaptureJournal(endBytes)
       transcribe(captureStartBytes, endBytes)
       return
     end
@@ -827,12 +900,7 @@ local function toggleCapture()
       hs.alert.closeAll(0)
       hs.alert.show("Dictation on — tap fn again to stop")
     end
-    toggleAutoStopTimer = hs.timer.doAfter(toggleMaxSeconds, function()
-      toggleAutoStopTimer = nil
-      if captureActive then
-        finishCapture()
-      end
-    end)
+
   end
 end
 
@@ -846,12 +914,14 @@ local function rearmHotkeyTapIfDisabled()
   if dictationFnTap:isEnabled() then
     return false
   end
-  fnWasDown = false
-  if captureActive then
-    captureActive = false
-    indicatorHide()
-  end
+  local flags = hs.eventtap.checkKeyboardModifiers(true)
+  fnWasDown = flags.fn or false
   dictationFnTap:start()
+  -- Losing the event tap must never discard the audio or stop Toggle recording.
+  -- In PTT, a release might have occurred while the tap was disabled: finalize it.
+  if captureActive and triggerMode == "ptt" and not fnWasDown then
+    finishCapture("Fn recovered — captured audio saved")
+  end
   print("dictation fn event tap was disabled — re-armed")
   return true
 end
@@ -859,9 +929,23 @@ end
 -- ===== watchdog: recorder alive, buffer growing, rotation =====
 
 dictationRecorderWatchdog = hs.timer.doEvery(5, function()
+  if captureFinalizing or transcribing or fileExists(captureJournalPath) and not captureActive then return end
   if captureActive then
+    local size, now = fileSize(bufferPath), hs.timer.secondsSinceEpoch()
+    if size > lastBufferSize then
+      lastBufferSize, lastGrowthAt = size, now
+    elseif now - lastGrowthAt > 12 then
+      recorderNeedsRestart = true
+      finishCapture("Microphone stalled — captured audio saved; check your microphone")
+    end
+    if dictationMenubar and captureActive then
+      local seconds = math.floor(now - capturePressedAt)
+      dictationMenubar:setTitle(string.format("%d:%02d", math.floor(seconds / 60), seconds % 60))
+    end
     return
   end
+
+  if recorderNeedsRestart then restartRecorder(); return end
 
   if not recorderIsRunning() then
     if not recorderRestartTimer then
@@ -899,12 +983,16 @@ dictationWakeWatcher:start()
 -- default microphone changed (headset plugged/unplugged) — restart
 hs.audiodevice.watcher.setCallback(function(event)
   if event == "dIn " then
+    if captureActive then finishCapture("Microphone changed — captured audio saved; start a new dictation") end
     restartRecorder()
   end
 end)
 hs.audiodevice.watcher.start()
 
 dictationFnTap = hs.eventtap.new({ hs.eventtap.event.types.flagsChanged }, function(event)
+  -- Arrow/navigation events can also carry the secondary-Fn flag. Only the physical
+  -- Fn key changes recording state (macOS virtual keycode 63).
+  if event:getKeyCode() ~= 63 then return false end
   local flags = event:getFlags()
   local fnDown = flags.fn or false
 
@@ -947,6 +1035,36 @@ end
 
 indicatorHide()
 
--- kill an orphaned recorder from a previous config load, then start ours
-hs.execute("/usr/bin/pkill -f 'dictation-buffer.raw' >/dev/null 2>&1", true)
-dictationStartupTimer = hs.timer.doAfter(0.5, startRecorder)
+hs.shutdownCallback = function()
+  -- The persisted journal survives reload/quit. The next launch snapshots the flushed
+  -- buffer before allowing a new recording to replace it.
+  if captureActive then saveCaptureJournal() end
+  stopRecorder()
+end
+
+-- Preserve the ring buffer through reloads until any interrupted capture is recovered.
+-- SIGINT flushes ffmpeg; never unlink a buffer still needed by a pending journal.
+hs.execute("/usr/bin/pkill -INT -f 'ffmpeg.*(dictation-buffer|capture-buffer).raw' >/dev/null 2>&1", true)
+hs.execute("/bin/chmod 700 " .. shellQuote(dataPath) .. " " .. shellQuote(recordingsPath))
+dictationStartupTimer = hs.timer.doAfter(0.5, function()
+  if fileExists(captureJournalPath) then
+    hs.alert.show("Interrupted recording saved — Ctrl+B to recover", 6)
+  else
+    startRecorder()
+  end
+end)
+dictationRetryHotkey = hs.hotkey.bind({ "ctrl" }, "b", retryLastRecording)
+
+-- Read-only diagnostics for the local hs CLI; no transcript or microphone contents.
+function dictationStatus()
+  return {
+    state = captureActive and "recording" or captureFinalizing and "saving"
+      or transcribing and "transcribing" or "idle",
+    mode = triggerMode,
+    recorderRunning = recorderIsRunning(),
+    bufferBytes = fileSize(bufferPath),
+    pendingCapture = fileExists(captureJournalPath),
+    lastJob = activeJobPath,
+    fnTapEnabled = dictationFnTap:isEnabled(),
+  }
+end
