@@ -9,8 +9,13 @@ and retrying it must never depend on a partial transcript or a moving byte offse
 ffmpeg continuously writes 16 kHz mono signed 16-bit PCM to
 `~/.local/share/whisper/capture-buffer.raw`. Fn remembers the current byte offset minus
 0.5 seconds of pre-roll. Push-to-talk stops on release; Toggle stops on the next press.
-Toggle has no five-minute auto-stop. The menu bar displays elapsed recording time and
-provides a stop action. Only the physical Fn key (keycode 63) changes recording state;
+Toggle defaults to a ten-minute safety limit, configurable under **Settings → Toggle
+recording limit** (10 minutes, 30 minutes, or no limit). A warning appears one minute before
+the limit. At the limit the controller saves the audio locally without recognition and
+returns Fn to service; Ctrl+B can transcribe it deliberately. The five-second watchdog
+enforces this limit, so stopping can occur up to five seconds after the boundary. Held
+push-to-talk has no such limit. The menu bar displays elapsed recording time and provides
+a stop action. Only the physical Fn key (keycode 63) changes recording state;
 synthetic Fn flags on other modifier/navigation events are ignored.
 
 On press, `active-capture.json` records the start offset. On stop, the controller waits up
@@ -24,7 +29,7 @@ Each attempt has a unique directory under `~/.local/share/whisper/recordings/`:
 |---|---|
 | `audio.wav` | Complete immutable input, saved before recognition starts |
 | `audio-ready` | Acknowledges the committed audio snapshot |
-| `status` | `running`, `done`, `ignored`, or `error:<reason>` |
+| `status` | `running`, `saved` (local-only), `done`, `ignored`, or `error:<reason>` |
 | `progress` | Current chunk / total chunks |
 | `transcript.txt` | Final result; no successful prefix on a failed job |
 | `raw.txt` | Unfiltered engine output for diagnosis |
@@ -46,10 +51,18 @@ recordings folder, accessible from the menu. Individual files can also be transc
 ~/.local/bin/dictation-transcribe.sh /path/to/audio.wav
 ```
 
-If Hammerspoon exits/reloads during capture, it preserves the journal and raw buffer,
-interrupts ffmpeg gracefully, and offers Ctrl+B recovery on the next launch. A new capture
-cannot overwrite an unrecovered journal. Config reload during recognition leaves the job
-archive available; Ctrl+B can retry the saved audio. Each retry has its own directory.
+If Hammerspoon exits/reloads during capture, it preserves the journal and raw buffer and
+interrupts ffmpeg gracefully. On the next launch the worker automatically saves the exact
+journaled range as an immutable WAV with `--save-only --cut`, without calling a recognition
+engine. Once `audio-ready` acknowledges the snapshot, the journal is cleared and the
+recorder resumes. Even a multi-hour accidental capture no longer requires transcription
+before Fn can work again. Ctrl+B can recognize the saved audio later; a new capture cannot
+overwrite the archived WAV. Config reload during recognition leaves the job archive
+available; Ctrl+B can retry the saved audio. Each retry has its own directory.
+
+A failed recovery keeps the original buffer and journal. **Save interrupted recording and
+resume** in the menu retries the local snapshot without recognition. Invalid metadata fails
+closed with an explicit error. No recording is deleted automatically.
 
 The Fn watchdog re-arms a disabled event tap without discarding a capture. Toggle keeps
 recording; push-to-talk checks the physical key state and finalizes if a release was missed.
@@ -114,11 +127,14 @@ Whisper Own retains its existing provider while adopting durable audio and retry
 ## Verification
 
 - `lua test-init-settings.lua`: settings, physical Fn edges, event-tap recovery, missed
-  releases, Toggle beyond five minutes, finalization races, stalled microphone, slow
-  recognition, focus changes, Ctrl+B, and interrupted-capture recovery.
+  releases, Toggle beyond five minutes, warning and local-only stop at the safety limit,
+  persistent limit settings, unlimited PTT, finalization races, stalled microphone, slow
+  recognition, focus changes, Ctrl+B, automatic interrupted-capture recovery, and safe
+  retry after a failed snapshot.
 - `bash test-worker-tuning.sh`: engine policy plus actual ffmpeg capture/chunking of 321
   seconds of PCM; exact sample coverage; failed middle chunk; identical-audio retry;
-  truncated buffer rejection; transient HTTP retry; filter/cleanup content preservation.
+  truncated buffer rejection; local-only recovery without engine calls; transient HTTP
+  retry; filter/cleanup content preservation.
 - `bash test-install-autostart.sh`: installation and login startup regression checks.
 
 The Fn recovery test fails against the pre-fix controller. The old filter reproduces loss
@@ -148,4 +164,18 @@ For current runtime diagnostics, use the bundled Hammerspoon CLI:
 ```
 
 `dictationStatus()` reports mode, lifecycle state, recorder liveness, buffer size, pending
-capture recovery, current job directory, and event-tap health without exposing audio/text.
+capture recovery, current job directory, Toggle limit, and event-tap health without exposing
+audio/text.
+
+Live verification on 2026-10-03:
+
+- Posted native Fn events started and stopped PTT and started Toggle in the installed
+  Hammerspoon. Reloading during Toggle saved 1.396 seconds from the actual microphone,
+  cleared the journal, and restarted the recorder without recognition.
+- Advancing only the controller's elapsed-time clock exercised the ten-minute warning
+  and automatic stop in the real app. The worker saved 1.812 seconds of actual audio with
+  `status=saved`, no engine call, and no chunks. The real clock was restored; the app
+  returned to idle with microphone and Fn enabled.
+- A short synthesized Russian phrase transcribed successfully through the installed
+  worker launched by Hammerspoon using its existing Groq configuration. These checks did
+  not paste text into the owner's foreground app.

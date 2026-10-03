@@ -7,6 +7,7 @@ umask 077
 # Modes:
 #   dictation-transcribe.sh --job DIR ...               — isolate all job IPC/artifacts
 #   dictation-transcribe.sh --retry                     — retry the saved live recording
+#   dictation-transcribe.sh --save-only --cut ...       — save audio locally and exit
 #   dictation-transcribe.sh /path/to/audio.wav            — transcribe an existing file
 #   dictation-transcribe.sh --cut BUFFER START END        — cut bytes [START, END) out of
 #     a raw ring buffer (s16le 16kHz mono), wrap into WAV and transcribe
@@ -23,9 +24,18 @@ MODE="file"
 AUDIO_PATH="/tmp/dictation.wav"
 SLICE_PATH="/tmp/dictation-slice.raw"
 JOB_DIR=""
+SAVE_ONLY=0
 if [ "${1:-}" = "--job" ]; then
   JOB_DIR="${2:?job directory required}"
   shift 2
+fi
+if [ "${1:-}" = "--save-only" ]; then
+  SAVE_ONLY=1
+  shift
+  if [ "${1:-}" != "--cut" ]; then
+    printf '%s\n' '--save-only requires --cut BUFFER START END' >&2
+    exit 1
+  fi
 fi
 
 if [ "${1:-}" = "--cut" ]; then
@@ -266,6 +276,12 @@ PY
   [ "$?" -eq 0 ] || finish_error "audio-backup"
 fi
 printf '%s\n' "$AUDIO_PATH" > "$JOB_DIR/audio-ready"
+if [ "$SAVE_ONLY" = "1" ]; then
+  # An interrupted multi-hour capture must not lock out Fn while recognition runs.
+  # Keep the same complete recovery WAV/last.wav contract, without any engine calls.
+  printf '%s\n' "saved" > "$STATUS_PATH"
+  exit 0
+fi
 
 read_groq_key() {
   if [ -n "${GROQ_API_KEY:-}" ]; then

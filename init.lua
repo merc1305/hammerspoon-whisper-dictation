@@ -48,6 +48,12 @@ if hs.settings and hs.settings.get then
   end
 end
 local toggleStartAlert = true -- brief on-screen hint when a toggle session starts
+local toggleLimitSettingKey = "whisperDictation.toggleLimitSeconds"
+local toggleLimitSeconds = hs.settings.get(toggleLimitSettingKey)
+if toggleLimitSeconds ~= 0 and toggleLimitSeconds ~= 600 and toggleLimitSeconds ~= 1800 then
+  toggleLimitSeconds = 600
+end
+local captureLimitWarned = false
 local hotkeyWatchdogInterval = 2 -- seconds between health checks of the fn event tap
 local menubarEnabled = true -- show a menu-bar icon (in addition to the on-screen dot)
 local menubarHistoryCount = 10 -- how many recent dictations the dropdown lists
@@ -72,7 +78,7 @@ local captureActive = false
 local captureFinalizing = false
 local captureTarget = nil
 local captureNotice = nil
-local finishCapture, retryLastRecording
+local finishCapture, retryLastRecording, savePendingCapture
 local function shellQuote(value)
   return "'" .. tostring(value):gsub("'", "'\"'\"'") .. "'"
 end
@@ -120,6 +126,12 @@ end
 
 local function trim(text)
   return (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function setToggleLimit(seconds)
+  if captureActive then return end
+  toggleLimitSeconds = seconds
+  hs.settings.set(toggleLimitSettingKey, seconds)
 end
 
 -- ===== on-screen indicator (small dot at the bottom of the screen) =====
@@ -503,8 +515,17 @@ local function menubarBuildMenu()
   if captureActive then
     local seconds = math.floor(hs.timer.secondsSinceEpoch() - capturePressedAt)
     menu[#menu + 1] = { title = string.format("Recording %d:%02d — stop and transcribe", math.floor(seconds / 60), seconds % 60), fn = function() finishCapture() end }
-  elseif transcribing or captureFinalizing then
+  elseif captureFinalizing then
+    menu[#menu + 1] = { title = "Saving recording…", disabled = true }
+  elseif transcribing then
     menu[#menu + 1] = { title = "Transcribing — recording is saved", disabled = true }
+  end
+  if fileExists(captureJournalPath) and not captureActive then
+    menu[#menu + 1] = {
+      title = "Save interrupted recording and resume",
+      disabled = captureFinalizing or transcribing,
+      fn = function() savePendingCapture() end,
+    }
   end
   menu[#menu + 1] = {
     title = "Retry last recording — Ctrl+B",
@@ -566,6 +587,15 @@ local function menubarBuildMenu()
         checked = (triggerMode == "toggle"),
         disabled = captureActive,
         fn = function() setTriggerMode("toggle") end,
+      },
+      {
+        title = "Toggle recording limit",
+        disabled = captureActive,
+        menu = {
+          { title = "10 minutes", checked = toggleLimitSeconds == 600, fn = function() setToggleLimit(600) end },
+          { title = "30 minutes", checked = toggleLimitSeconds == 1800, fn = function() setToggleLimit(1800) end },
+          { title = "No limit", checked = toggleLimitSeconds == 0, fn = function() setToggleLimit(0) end },
+        },
       },
       { title = "-" },
       { title = "Advanced: edit ~/.hammerspoon/init.lua", disabled = true },
@@ -693,7 +723,7 @@ end
 
 -- ===== transcription =====
 
-local function transcribe(startBytes, endBytes, retry)
+local function transcribe(startBytes, endBytes, retry, saveOnly)
   if transcribing then return end
   if not fileExists(transcribeScriptPath) then
     captureFinalizing = false
@@ -709,6 +739,7 @@ local function transcribe(startBytes, endBytes, retry)
   hs.fs.mkdir(jobPath)
   local resultPath, statusPath = jobPath .. "/transcript.txt", jobPath .. "/status"
   local command = shellQuote(transcribeScriptPath) .. " --job " .. shellQuote(jobPath)
+  if saveOnly then command = command .. " --save-only" end
   if retry then
     command = command .. " --retry"
   else
@@ -739,10 +770,19 @@ local function transcribe(startBytes, endBytes, retry)
     local status = trim(readTextFile(statusPath))
     local progress = trim(readTextFile(jobPath .. "/progress"))
     if dictationMenubar and progress ~= "" then dictationMenubar:setTitle("… " .. progress) end
-    if status == "done" or status == "ignored" or status:match("^error") or exited then
+    if status == "done" or status == "saved" or status == "ignored" or status:match("^error") or exited then
       transcribing, captureFinalizing = false, false
       if dictationMenubar then dictationMenubar:setTitle("") end
-      if status == "done" then
+      if saveOnly then
+        if status == "saved" and not fileExists(captureJournalPath) then
+          indicatorHide()
+          startRecorder()
+          hs.alert.show("Recording saved locally — Fn ready; Ctrl+B to transcribe", 6)
+        else
+          showError("Could not save recording — audio kept; use Save interrupted recording and resume")
+          print("capture recovery failed: " .. readTextFile(jobPath .. "/error.log"))
+        end
+      elseif status == "done" then
         local text = trim(readTextFile(resultPath))
         if text == "" then
           showError("No speech recognized — audio saved; Ctrl+B to retry")
@@ -762,6 +802,23 @@ local function transcribe(startBytes, endBytes, retry)
     schedulePoll()
   end
   schedulePoll()
+end
+
+savePendingCapture = function()
+  if captureActive or captureFinalizing or transcribing then return end
+  local ok, pending = pcall(hs.json.decode, readTextFile(captureJournalPath))
+  local size = alignDown(fileSize(bufferPath))
+  if not ok or type(pending) ~= "table" or type(pending.start) ~= "number"
+      or pending.start < 0 or pending.start % 2 ~= 0
+      or (pending.finish ~= nil and (type(pending.finish) ~= "number"
+        or pending.finish % 2 ~= 0 or pending.finish > size))
+      or (pending.finish or size) <= pending.start then
+    showError("Cannot recover recording metadata — original audio kept in capture buffer")
+    return
+  end
+  captureTarget, captureNotice = nil, nil
+  captureFinalizing = true
+  transcribe(pending.start, pending.finish or size, false, true)
 end
 
 local function rememberTarget()
@@ -795,7 +852,7 @@ local function startCapture()
     return
   end
   if fileExists(captureJournalPath) then
-    showError("Unprocessed recording saved — Ctrl+B to recover it first")
+    showError("Recording pending — use Save interrupted recording and resume in the menu")
     return
   end
   if recorderNeedsRestart then
@@ -806,6 +863,7 @@ local function startCapture()
 
   captureTarget, captureNotice = rememberTarget(), nil
   captureActive = true
+  captureLimitWarned = false
   capturePressedAt = hs.timer.secondsSinceEpoch()
 
   if not recorderIsRunning() then
@@ -832,7 +890,7 @@ local function startCapture()
   indicatorShowRecording()
 end
 
-finishCapture = function(notice)
+finishCapture = function(notice, saveOnly)
   if not captureActive then
     return
   end
@@ -881,7 +939,7 @@ finishCapture = function(notice)
         return
       end
       saveCaptureJournal(endBytes)
-      transcribe(captureStartBytes, endBytes)
+      transcribe(captureStartBytes, endBytes, false, saveOnly)
       return
     end
 
@@ -937,6 +995,16 @@ dictationRecorderWatchdog = hs.timer.doEvery(5, function()
   if captureFinalizing or transcribing or fileExists(captureJournalPath) and not captureActive then return end
   if captureActive then
     local size, now = fileSize(bufferPath), hs.timer.secondsSinceEpoch()
+    local elapsed = now - capturePressedAt
+    if triggerMode == "toggle" and toggleLimitSeconds > 0 then
+      if elapsed >= toggleLimitSeconds then
+        finishCapture("Toggle time limit reached — saving audio locally", true)
+        return
+      elseif elapsed >= toggleLimitSeconds - 60 and not captureLimitWarned then
+        captureLimitWarned = true
+        hs.alert.show("Toggle stops in one minute — tap Fn to finish and transcribe", 6)
+      end
+    end
     if size > lastBufferSize then
       lastBufferSize, lastGrowthAt = size, now
     elseif now - lastGrowthAt > 12 then
@@ -1053,7 +1121,7 @@ hs.execute("/usr/bin/pkill -INT -f 'ffmpeg.*(dictation-buffer|capture-buffer).ra
 hs.execute("/bin/chmod 700 " .. shellQuote(dataPath) .. " " .. shellQuote(recordingsPath))
 dictationStartupTimer = hs.timer.doAfter(0.5, function()
   if fileExists(captureJournalPath) then
-    hs.alert.show("Interrupted recording saved — Ctrl+B to recover", 6)
+    savePendingCapture()
   else
     startRecorder()
   end
@@ -1066,6 +1134,7 @@ function dictationStatus()
     state = captureActive and "recording" or captureFinalizing and "saving"
       or transcribing and "transcribing" or "idle",
     mode = triggerMode,
+    toggleLimitSeconds = toggleLimitSeconds,
     recorderRunning = recorderIsRunning(),
     bufferBytes = fileSize(bufferPath),
     pendingCapture = fileExists(captureJournalPath),

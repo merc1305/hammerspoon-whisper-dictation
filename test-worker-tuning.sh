@@ -114,6 +114,7 @@ worker = root / 'dictation-transcribe.sh'
 model = tmp / 'model.bin'
 recognizer = tmp / 'recognizer'
 recognizer.write_text('''#!/bin/bash
+[ -z "${ENGINE_CALL_LOG:-}" ] || touch "$ENGINE_CALL_LOG"
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-f" ]; then audio="$2"; shift; fi
   shift
@@ -145,6 +146,22 @@ def run(args, **overrides):
 
 def pcm(path):
     with wave.open(str(path)) as f: return f.readframes(f.getnframes())
+
+# Recovery must save every sample without calling any recognition service/model.
+engine_called = tmp/'engine-called'
+saved, result = run(['--save-only', '--cut', raw, 16000, raw.stat().st_size],
+                    ENGINE_CALL_LOG=str(engine_called))
+assert result.returncode == 0, result.stderr
+assert (saved/'status').read_text().strip() == 'saved'
+assert (saved/'audio-ready').is_file()
+assert pcm(saved/'audio.wav') == raw.read_bytes()[16000:]
+assert pcm(tmp/'last.wav') == pcm(saved/'audio.wav')
+assert not engine_called.exists(), 'local recovery invoked a recognition engine'
+assert not (saved/'chunks').exists(), 'local recovery should not chunk audio'
+assert (saved/'transcript.txt').read_text() == ''
+retry_saved, result = run(['--retry'])
+assert result.returncode == 0
+assert pcm(retry_saved/'audio.wav') == pcm(saved/'audio.wav')
 
 job, result = run(['--cut', raw, 16000, raw.stat().st_size])
 assert result.returncode == 0, result.stderr

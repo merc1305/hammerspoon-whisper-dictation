@@ -4,6 +4,7 @@
 local source = debug.getinfo(1, "S").source:sub(2)
 local root = source:match("^(.*)/[^/]+$") or "."
 local settingKey = "whisperDictation.triggerMode"
+local limitKey = "whisperDictation.toggleLimitSeconds"
 
 package.preload["hs.ipc"] = function() return {} end
 local files, sizes, jsonValues, tasks, timers = {}, {}, {}, {}, {}
@@ -355,6 +356,44 @@ assert(recording(), "hotkey watchdog discarded Toggle capture")
 advance(5); fn(true); fn(false); advance(1)
 assertEqual(#workers(), 1, "long toggle creates one complete recording")
 
+-- Accidental Toggle sessions warn once and stop locally at the default ten minutes.
+loadConfig(); advance(1); fn(true); fn(false)
+assertEqual(dictationStatus().toggleLimitSeconds, 600, "safe default Toggle limit")
+local alertCount = #alerts
+advance(550)
+assert(recording(), "warning must not truncate an intentional recording")
+assertEqual(#alerts, alertCount + 1, "one warning before the limit")
+assert(alerts[#alerts]:find("one minute"), "limit warning missing")
+advance(55)
+assert(not recording(), "Toggle exceeded its limit")
+assertEqual(#workers(), 1, "limit snapshots once")
+assert(workers()[1].args[3]:find("--save-only --cut", 1, true), "limit must not launch recognition")
+local limitJob = assert(workers()[1].args[3]:match("%-%-job '([^']+)'"))
+files[limitJob .. "/audio-ready"] = "saved"
+files[limitJob .. "/status"] = "saved"
+files[lastWavPath] = "audio"
+advance(1)
+assertEqual(dictationStatus().state, "idle", "ready after automatic stop")
+assertEqual(dictationStatus().recorderRunning, true, "recorder alive after automatic stop")
+fn(true); fn(false)
+assert(recording(), "Fn works immediately after automatic stop")
+
+-- The limit is configurable/persistent and applies only to Toggle, never held PTT.
+loadConfig()
+local limits = findItem(findItem(lastMenubar.menuBuilder(), "Settings").menu, "Toggle recording limit").menu
+findItem(limits, "30 minutes").fn()
+loadConfig()
+assertEqual(dictationStatus().toggleLimitSeconds, 1800, "limit survives reload")
+settingsStore[limitKey] = 0
+loadConfig(); advance(1); fn(true); fn(false); advance(1900)
+assert(recording(), "explicit no-limit Toggle stays active")
+settingsStore[limitKey] = "invalid"
+settingsStore[settingKey] = "ptt"
+loadConfig(); advance(1); fn(true); advance(610)
+assertEqual(dictationStatus().toggleLimitSeconds, 600, "invalid limit falls back safely")
+assert(recording(), "Toggle limit must not interrupt PTT")
+settingsStore[settingKey] = "toggle"
+
 -- Fn during final tail flush/processing cannot overwrite the captured start offset.
 loadConfig(); advance(1); fn(true); fn(false); advance(2)
 growing = false
@@ -381,14 +420,55 @@ lastHotkey(); advance(0.1)
 assertEqual(#workers(), 2, "Ctrl+B launches actual retranscription")
 assert(workers()[2].args[3]:find("--retry", 1, true), "Ctrl+B must use saved audio")
 
--- An interrupted capture journal blocks buffer deletion and is recoverable after reload.
+-- Reload saves an interrupted capture locally, then resumes without recognizing hours
+-- of accidental audio. The buffer remains protected until the snapshot is acknowledged.
 loadConfig()
 files[journalPath] = hs.json.encode({ start = 16000, finish = 96000 })
 sizes[bufferPath] = 200000
 advance(6)
-assertEqual(#tasks, 0, "startup must not erase an unrecovered buffer")
-lastHotkey()
+assertEqual(#workers(), 1, "startup saves the interrupted capture automatically")
+assertEqual(dictationStatus().recorderRunning, false, "preserve buffer during recovery")
+assertEqual(sizes[bufferPath], 200000, "startup must not erase an unrecovered buffer")
+assert(workers()[1].args[3]:find("--save-only --cut", 1, true), "startup recovery must not transcribe")
 assert(workers()[1].args[3]:find("16000 96000", 1, true), "recovery uses journal boundaries")
+fn(true); fn(false)
+assertEqual(#workers(), 1, "Fn cannot race recovery")
+local recoveredJob = assert(workers()[1].args[3]:match("%-%-job '([^']+)'"))
+files[recoveredJob .. "/audio-ready"] = "saved"
+files[recoveredJob .. "/status"] = "saved"
+files[lastWavPath] = "recovered audio"
+advance(1)
+assertEqual(files[journalPath], nil, "release gate only after audio is safe")
+assertEqual(dictationStatus().recorderRunning, true, "resume recorder after saving")
+assertEqual(pastes, 0, "recovery must not paste anything")
+lastHotkey()
+assert(workers()[2].args[3]:find("--retry", 1, true), "Ctrl+B can recognize the saved recovery")
+complete("Recovered recording")
+fn(true); fn(false)
+assert(recording(), "new Toggle capture works after recovery")
+
+-- A failed snapshot keeps the raw audio and offers a local save/resume retry.
+loadConfig()
+files[journalPath] = hs.json.encode({ start = 16000 })
+sizes[bufferPath] = 200000
+advance(1)
+assert(workers()[1].args[3]:find("16000 200000", 1, true), "unfinished journal uses flushed buffer end")
+local failedJob = assert(workers()[1].args[3]:match("%-%-job '([^']+)'"))
+files[failedJob .. "/status"] = "error:cut"
+advance(1)
+assert(files[journalPath], "failed recovery keeps the journal")
+assertEqual(sizes[bufferPath], 200000, "failed recovery keeps the original audio")
+assertEqual(dictationStatus().recorderRunning, false, "failed save must not overwrite audio")
+findItem(lastMenubar.menuBuilder(), "Save interrupted recording and resume").fn()
+assertEqual(#workers(), 2, "save/resume can be retried without recognition")
+
+-- Corrupt metadata cannot silently erase the source audio.
+loadConfig()
+files[journalPath] = "invalid JSON"
+sizes[bufferPath] = 200000
+advance(6)
+assertEqual(#tasks, 0, "corrupt journal fails closed")
+assertEqual(sizes[bufferPath], 200000, "corrupt journal preserves audio")
 
 os.getenv = realGetenv
-print("PASS settings, Fn recovery, >5-minute Toggle, races, microphone loss, retry, focus, reload")
+print("PASS settings, Fn recovery, Toggle safety limit, races, microphone loss, retry, focus, reload")
